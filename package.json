@@ -5,9 +5,10 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "build": "electron-builder -mwl",
-    "build:win": "electron-builder --win",
-    "build:mac": "electron-builder --mac",
+    "icons": "node scripts/create-icons.js",
+    "build": "npm run icons && electron-builder -mwl",
+    "build:win": "npm run icons && electron-builder --win",
+    "build:mac": "npm run icons && electron-builder --mac",
     "build:linux": "electron-builder --linux",
     "pack": "electron-builder --dir"
   },
@@ -38,7 +39,10 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     },
     "mac": {
       "target": [
