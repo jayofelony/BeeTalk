@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';">
+  <title>BeeTalk</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- Title bar -->
+<div id="titlebar">
+  <div id="titlebar-drag">
+    <span id="app-icon">&#9656;</span>
+    <span id="app-title">BeeTalk</span>
+  </div>
+  <div id="titlebar-controls">
+    <button class="tb-btn" id="btn-minimize" title="Minimize">&#8722;</button>
+    <button class="tb-btn" id="btn-maximize" title="Maximize">&#9633;</button>
+    <button class="tb-btn danger" id="btn-close" title="Close to tray">&#10005;</button>
+  </div>
+</div>
+
+<!-- Main layout -->
+<div id="layout">
+
+  <!-- Account switcher sidebar -->
+  <div id="account-bar">
+    <div id="account-list"></div>
+    <button id="btn-add-account" title="Add account">+</button>
+  </div>
+
+  <!-- Left panel: contacts + rooms -->
+  <div id="left-panel">
+    <div id="left-top">
+      <div id="current-account-info">
+        <div id="cur-avatar" class="avatar">?</div>
+        <div id="cur-details">
+          <div id="cur-jid">Not connected</div>
+          <div id="cur-status-row">
+            <span class="status-dot dot-gray" id="cur-status-dot"></span>
+            <span id="cur-status-text">Offline</span>
+          </div>
+        </div>
+        <button id="btn-settings" title="Settings">&#9881;</button>
+      </div>
+      <div id="search-bar">
+        <input id="search-input" placeholder="Search contacts &amp; rooms…" />
+      </div>
+    </div>
+
+    <div id="left-tabs">
+      <button class="ltab active" data-tab="contacts">Contacts</button>
+      <button class="ltab" data-tab="rooms">Rooms</button>
+    </div>
+
+    <div id="contacts-panel" class="tab-panel active">
+      <div id="contact-list"></div>
+    </div>
+
+    <div id="rooms-panel" class="tab-panel">
+      <div id="room-list"></div>
+      <button id="btn-browse-rooms">🔍 Browse rooms</button>
+    </div>
+
+    <div id="left-footer">
+      <div style="font-size: 11px; color: var(--text3); text-align: center; line-height: 1.4;">
+        Like Gabber? Support development:<br>
+        <span style="color: var(--accent); font-weight: 500;">Send ISK to JayJ Plaude</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right panel: chat area -->
+  <div id="right-panel">
+    <div id="welcome-screen">
+      <div id="welcome-inner">
+        <div id="welcome-logo">&#9656;</div>
+        <h2>BeeTalk</h2>
+        <p>Select a contact or room to start chatting, or add an account to connect.</p>
+        <button id="btn-welcome-add">Add an account</button>
+      </div>
+    </div>
+
+    <div id="chat-area" style="display:none;">
+      <div id="chat-header">
+        <div id="chat-header-avatar" class="avatar">?</div>
+        <div id="chat-header-info">
+          <div id="chat-header-name">—</div>
+          <div id="chat-header-sub"></div>
+        </div>
+        <div id="chat-header-actions">
+          <button class="icon-btn" id="btn-chat-info" title="Info">&#9432;</button>
+        </div>
+      </div>
+
+      <div id="messages-area"></div>
+
+      <div id="input-row">
+        <div id="input-wrap">
+          <textarea id="msg-input" placeholder="Write a message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+        </div>
+        <button id="btn-emoticon" title="Add emoticon">😊</button>
+        <button id="btn-send">Send</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div id="modal-overlay" class="hidden">
+  <div id="modal-box">
+    <div id="modal-content"></div>
+  </div>
+</div>
+
+<!-- Context Menu -->
+<div id="context-menu" class="hidden"></div>
+
+<!-- Scripts -->
+<script src="app.js"></script>
+</body>
+</html>

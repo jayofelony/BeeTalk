@@ -1,0 +1,93 @@
+{
+  "name": "beetalk",
+  "version": "1.0.0",
+  "description": "A modern XMPP chat client",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder -mwl",
+    "build:win": "electron-builder --win",
+    "build:mac": "electron-builder --mac",
+    "build:linux": "electron-builder --linux",
+    "pack": "electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.beetalk.app",
+    "productName": "BeeTalk",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.utilities"
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 110,
+          "y": 150,
+          "type": "file"
+        },
+        {
+          "x": 240,
+          "y": 150,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "icon": "assets/icon.png",
+      "category": "Network"
+    }
+  },
+  "devDependencies": {
+    "electron": "^41.2.0",
+    "electron-builder": "^26.8.1",
+    "icns": "^0.1.0",
+    "icojs": "^0.21.1",
+    "png-to-ico": "^3.0.1",
+    "sharp": "^0.34.5"
+  },
+  "dependencies": {
+    "@xmpp/client": "^0.13.0",
+    "@xmpp/debug": "^0.13.0",
+    "electron-store": "^8.1.0",
+    "gif.js": "^0.2.0",
+    "keytar": "^7.9.0"
+  },
+  "overrides": {
+    "file-type": "^22.0.0"
+  }
+}
