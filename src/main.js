@@ -957,6 +957,7 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
                 // Give installer time to start, then quit
                 setTimeout(() => {
                   console.log('Quitting app for update installation');
+                  app.isQuitting = true;
                   app.quit();
                 }, 1500);
               } catch (err) {
@@ -995,7 +996,8 @@ app.whenReady().then(async () => {
   createTray();
 
   // Auto-check for updates on startup (silent, non-blocking)
-  setTimeout(async () => {
+  // Wait for renderer to be ready
+  mainWindow.webContents.on('did-finish-load', async () => {
     try {
       const result = await performUpdateCheck();
       if (result?.status === 'update-available') {
@@ -1006,7 +1008,7 @@ app.whenReady().then(async () => {
     } catch (err) {
       console.error('Auto-update check failed:', err);
     }
-  }, 2000); // Wait 2 seconds after window creation
+  });
 });
 
 app.on('window-all-closed', () => { /* stay in tray */ });
