@@ -518,6 +518,8 @@ function openChat(key) {
   if (!chat) return;
 
   const isRoom = chat.type === 'room';
+  const isDirectorbot = chat.jid && chat.jid.startsWith('directorbot@');
+
   chatHeaderAv.className     = 'avatar ' + avatarColor(chat.jid);
   chatHeaderAv.style.borderRadius = isRoom ? '6px' : '10px';
   chatHeaderAv.textContent   = isRoom ? '#' : initials(chat.name);
@@ -527,6 +529,30 @@ function openChat(key) {
   const pp = document.getElementById('participants-panel');
   if (pp) { isRoom ? pp.classList.add('open') : pp.classList.remove('open'); }
   if (isRoom && pp) renderParticipants(chat);
+
+  // Hide input row for Directorbot (read-only)
+  const inputRow = document.getElementById('input-row');
+  if (inputRow) {
+    inputRow.style.display = isDirectorbot ? 'none' : 'flex';
+  }
+
+  // Switch to appropriate tab
+  const contactsTab = document.querySelector('.ltab[data-tab="contacts"]');
+  const roomsTab = document.querySelector('.ltab[data-tab="rooms"]');
+
+  if (isRoom && roomsTab) {
+    // Switch to rooms tab
+    document.querySelectorAll('.ltab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    roomsTab.classList.add('active');
+    document.getElementById('rooms-panel').classList.add('active');
+  } else if (!isRoom && contactsTab) {
+    // Switch to contacts tab for DMs and Directorbot
+    document.querySelectorAll('.ltab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    contactsTab.classList.add('active');
+    document.getElementById('contacts-panel').classList.add('active');
+  }
 
   // Load MAM history for DMs (always reload to get archived messages)
   if (!isRoom) {
