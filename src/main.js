@@ -893,11 +893,8 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
             // Execute installer silently and quit app
             console.log('Downloaded installer to:', installerPath);
 
-            // Close the app gracefully before installing
-            mainWindow.close();
-
-            // Run installer with silent flag
-            execFile(installerPath, ['/S'], (err) => {
+            // Run installer with silent flag (detached so it doesn't inherit our locks)
+            execFile(installerPath, ['/S'], { detached: true }, (err) => {
               if (err) {
                 console.error('Installer error:', err);
                 resolve({ status: 'error', error: 'Installation failed: ' + err.message });
@@ -912,6 +909,11 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
                 console.error('Failed to clean up installer:', e);
               }
             });
+
+            // Close the app after starting the installer
+            setTimeout(() => {
+              mainWindow.close();
+            }, 500);
           });
 
           fileStream.on('error', (err) => {
