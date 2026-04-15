@@ -890,29 +890,45 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
             fileStream.close();
             clearTimeout(timeout);
 
-            // Execute installer silently and quit app
             console.log('Downloaded installer to:', installerPath);
+            console.log('File size:', fs.statSync(installerPath).size);
 
-            // Run installer with silent flag (detached so it doesn't inherit our locks)
-            execFile(installerPath, ['/S'], { detached: true }, (err) => {
-              if (err) {
-                console.error('Installer error:', err);
-                resolve({ status: 'error', error: 'Installation failed: ' + err.message });
-              } else {
-                resolve({ status: 'installed', message: 'Update installed successfully' });
-              }
-
-              // Clean up installer
-              try {
-                fs.unlinkSync(installerPath);
-              } catch (e) {
-                console.error('Failed to clean up installer:', e);
-              }
-            });
-
-            // Close the app after starting the installer
+            // Wait a bit for file handles to release, then execute installer
             setTimeout(() => {
-              mainWindow.close();
+              try {
+                // Run installer with silent flag (detached so it doesn't inherit our locks)
+                const proc = execFile(installerPath, ['/S'], {
+                  detached: true,
+                  stdio: 'ignore'
+                }, (err) => {
+                  if (err) {
+                    console.error('Installer error:', err);
+                    resolve({ status: 'error', error: 'Installation failed: ' + err.message });
+                  } else {
+                    resolve({ status: 'installed', message: 'Update installed successfully' });
+                  }
+
+                  // Clean up installer after a delay
+                  setTimeout(() => {
+                    try {
+                      fs.unlinkSync(installerPath);
+                    } catch (e) {
+                      console.error('Failed to clean up installer:', e);
+                    }
+                  }, 2000);
+                });
+
+                // Unref so this process doesn't keep the app alive
+                proc.unref();
+
+                // Close the app after installer starts
+                setTimeout(() => {
+                  mainWindow.close();
+                }, 1000);
+              } catch (err) {
+                console.error('Failed to start installer:', err);
+                resolve({ status: 'error', error: 'Failed to start installer: ' + err.message });
+              }
             }, 500);
           });
 
