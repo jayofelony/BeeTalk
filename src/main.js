@@ -850,6 +850,30 @@ async function performUpdateCheck() {
 
 ipcMain.handle('check-update', performUpdateCheck);
 
+// Cleanup function for graceful shutdown before update
+async function cleanupBeforeUpdate() {
+  try {
+    // Disconnect all XMPP connections
+    for (const id in connections) {
+      try {
+        await destroyConnection(id);
+      } catch (err) {
+        console.error(`Error destroying connection ${id}:`, err);
+      }
+    }
+
+    // Clear all reconnect timers
+    for (const id in reconnectTimers) {
+      clearTimeout(reconnectTimers[id]);
+      delete reconnectTimers[id];
+    }
+
+    console.log('Cleanup complete');
+  } catch (err) {
+    console.error('Error during cleanup:', err);
+  }
+}
+
 ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
   try {
     const https = require('https');
@@ -907,25 +931,24 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
                   } else {
                     resolve({ status: 'installed', message: 'Update installed successfully' });
                   }
-
-                  // Clean up installer after a delay
-                  setTimeout(() => {
-                    try {
-                      fs.unlinkSync(installerPath);
-                    } catch (e) {
-                      console.error('Failed to clean up installer:', e);
-                    }
-                  }, 2000);
                 });
 
                 // Unref so this process doesn't keep the app alive
                 proc.unref();
 
-                // Close the app after installer starts
-                setTimeout(() => {
-                  app.isQuitting = true;
-                  mainWindow.close();
-                }, 1000);
+                // Cleanup and close the app after installer starts
+                (async () => {
+                  await cleanupBeforeUpdate();
+                  // Clean up installer file
+                  try {
+                    fs.unlinkSync(installerPath);
+                    console.log('Installer file cleaned up');
+                  } catch (e) {
+                    console.error('Failed to clean up installer:', e);
+                  }
+                  // Now quit the app
+                  app.quit();
+                })();
               } catch (err) {
                 console.error('Failed to start installer:', err);
                 resolve({ status: 'error', error: 'Failed to start installer: ' + err.message });
@@ -978,3 +1001,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => { /* stay in tray */ });
 app.on('activate', () => mainWindow.show());
+
+app.on('before-quit', async (e) => {
+  // Clean up connections before quitting
+  await cleanupBeforeUpdate();
+});
