@@ -1070,7 +1070,6 @@ function showAccountSettingsModal() {
   const settings = getAppSettings();
   const theme = settings.theme || 'dark';
   const alarmEnabled = settings.alarmEnabled !== false;  // Default to true
-  const version = window.electronAPI.getVersion?.();
 
   showModal(`
     <div class="modal-title">Account Settings</div>
@@ -1118,7 +1117,7 @@ function showAccountSettingsModal() {
 
     <div style="border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
       <div style="font-weight: 500; margin-bottom: 12px; font-size: 12px; color: var(--text2); text-transform: uppercase;">Updates</div>
-      ${version ? `<div style="font-size: 11px; color: var(--text3); margin-bottom: 8px;">Current version: <strong style="color: var(--text1);">v${version}</strong></div>` : ''}
+      ${appVersion ? `<div style="font-size: 11px; color: var(--text3); margin-bottom: 8px;">Current version: <strong style="color: var(--text1);">v${appVersion}</strong></div>` : ''}
       <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
         <button class="btn-secondary" id="update-check-btn" onclick="checkForUpdate()">Check for Updates</button>
         <span id="update-status" style="font-size: 12px; color: var(--text2);"></span>
@@ -1320,6 +1319,7 @@ async function loadAndConnect() {
 // ─────────────────────────────────────────────
 let emoticons = {};  // Loaded emoticons organized by folder
 let emoticonsList = [];  // Flat list for parsing
+let appVersion = '';  // Cached app version
 
 function getAppSettings() {
   try {
@@ -1870,11 +1870,13 @@ document.addEventListener('click', (e) => {
 //  Boot
 // ─────────────────────────────────────────────
 (async () => {
-  // Set version in title bar
-  const version = window.electronAPI.getVersion?.();
-  if (version) {
+  // Get and cache version
+  try {
+    appVersion = await window.electronAPI.getVersion?.();
     const versionEl = $('app-version');
-    if (versionEl) versionEl.textContent = `v${version}`;
+    if (versionEl && appVersion) versionEl.textContent = `v${appVersion}`;
+  } catch (err) {
+    console.error('Failed to get version:', err);
   }
 
   await loadEmoticons();

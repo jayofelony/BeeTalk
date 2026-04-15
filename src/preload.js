@@ -1,10 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { version } = require('../package.json');
 
 // Expose safe APIs to renderer process via contextBridge
 contextBridge.exposeInMainWorld('electronAPI', {
   // App info
-  getVersion: () => version,
+  getVersion: () => ipcRenderer.invoke('get-version'),
 
   // Window controls
   windowMinimize: () => ipcRenderer.send('window-minimize'),

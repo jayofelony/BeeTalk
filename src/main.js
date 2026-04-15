@@ -845,6 +845,10 @@ async function performUpdateCheck() {
 
 ipcMain.handle('check-update', performUpdateCheck);
 
+ipcMain.handle('get-version', () => {
+  return require('../package.json').version;
+});
+
 // ─────────────────────────────────────────────
 //  Boot
 // ─────────────────────────────────────────────
