@@ -698,6 +698,11 @@ img[src$=".gif"] {
   transition: background 0.15s;
 }
 .btn-secondary:hover { background: var(--bg3); }
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-secondary:disabled:hover { background: transparent; }
 .btn-danger {
   padding: 8px 18px;
   background: transparent;

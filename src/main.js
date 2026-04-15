@@ -714,15 +714,233 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
 });
 
 // ─────────────────────────────────────────────
+//  Update checker
+// ─────────────────────────────────────────────
+async function compareVersions(current, latest) {
+  const parsePart = (v) => {
+    const parts = v.split('.');
+    return parts.map(p => parseInt(p, 10) || 0);
+  };
+  const curr = parsePart(current);
+  const ltest = parsePart(latest);
+
+  for (let i = 0; i < Math.max(curr.length, ltest.length); i++) {
+    const c = curr[i] || 0;
+    const l = ltest[i] || 0;
+    if (l > c) return 1;  // update available
+    if (l < c) return -1; // current is newer
+  }
+  return 0; // same version
+}
+
+async function performUpdateCheck() {
+  try {
+    console.log('Starting update check...');
+    const https = require('https');
+    const currentVersion = require('../package.json').version;
+    console.log('Current version:', currentVersion);
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        console.log('Update check timed out');
+        resolve({ status: 'error', error: 'Update check timed out' });
+      }, 8000);
+
+      const options = {
+        hostname: 'api.github.com',
+        path: '/repos/jayofelony/BeeTalk/tags?per_page=1',
+        method: 'GET',
+        headers: { 'User-Agent': 'BeeTalk' }
+      };
+
+      console.log('Fetching tags from GitHub...');
+      https.request(options, (res) => {
+        console.log('Got response, status:', res.statusCode);
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          clearTimeout(timeout);
+          console.log('Raw response data:', data.slice(0, 200));
+          try {
+            const tags = JSON.parse(data);
+            console.log('Parsed tags:', tags.length);
+
+            if (!Array.isArray(tags) || tags.length === 0) {
+              console.log('No tags found');
+              resolve({ status: 'error', error: 'No tags found in repository' });
+              return;
+            }
+
+            const latestTag = tags[0];
+            console.log('Latest tag:', latestTag.name);
+            const latestVersion = latestTag.name.replace(/^v/, '');
+            const comparison = compareVersions(currentVersion, latestVersion);
+            console.log('Version comparison:', currentVersion, 'vs', latestVersion, '=', comparison);
+
+            if (comparison < 0) {
+              console.log('Update available, fetching release info...');
+              // Get the release/pre-release info for this tag
+              const releaseOptions = {
+                hostname: 'api.github.com',
+                path: `/repos/jayofelony/BeeTalk/releases/tags/${latestTag.name}`,
+                method: 'GET',
+                headers: { 'User-Agent': 'BeeTalk' }
+              };
+
+              https.request(releaseOptions, (releaseRes) => {
+                console.log('Release response status:', releaseRes.statusCode);
+                let releaseData = '';
+                releaseRes.on('data', chunk => releaseData += chunk);
+                releaseRes.on('end', () => {
+                  try {
+                    const release = JSON.parse(releaseData);
+                    console.log('Parsed release, assets:', release.assets ? release.assets.length : 0);
+                    const exeAsset = release.assets.find(a => a.name.endsWith('.exe'));
+
+                    if (!exeAsset) {
+                      console.log('No exe asset found');
+                      resolve({ status: 'error', error: 'No Windows installer found for this tag' });
+                    } else {
+                      console.log('Found exe asset:', exeAsset.name);
+                      resolve({
+                        status: 'update-available',
+                        version: latestVersion,
+                        downloadUrl: exeAsset.browser_download_url,
+                        releaseNotes: release.body || 'No release notes available',
+                        downloadName: exeAsset.name
+                      });
+                    }
+                  } catch (err) {
+                    console.error('Release parse error:', err.message);
+                    resolve({ status: 'error', error: 'Failed to parse release data: ' + err.message });
+                  }
+                });
+              }).on('error', (err) => {
+                console.error('Release request error:', err.message);
+                // If release endpoint fails, just report update available without asset info
+                resolve({
+                  status: 'update-available',
+                  version: latestVersion,
+                  downloadUrl: '',
+                  releaseNotes: 'Update available (download from releases page)',
+                  downloadName: ''
+                });
+              }).end();
+            } else {
+              console.log('Already up to date');
+              resolve({ status: 'up-to-date', version: currentVersion });
+            }
+          } catch (err) {
+            clearTimeout(timeout);
+            console.error('Tag parse error:', err.message);
+            resolve({ status: 'error', error: 'Failed to parse tag data: ' + err.message });
+          }
+        });
+      }).on('error', (err) => {
+        clearTimeout(timeout);
+        console.error('Tag request error:', err.message);
+        resolve({ status: 'error', error: err.message });
+      }).end();
+    });
+  } catch (err) {
+    console.error('Update check exception:', err.message);
+    return { status: 'error', error: err.message };
+  }
+}
+
+ipcMain.handle('check-update', performUpdateCheck);
+
+ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
+  try {
+    const https = require('https');
+    const { execFile } = require('child_process');
+    const fs = require('fs');
+    const os = require('os');
+
+    const tempDir = os.tmpdir();
+    const installerPath = path.join(tempDir, downloadName);
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        resolve({ status: 'error', error: 'Download timed out' });
+      }, 30000); // 30 second timeout for download
+
+      // Download the installer
+      https.get(downloadUrl, (response) => {
+        if (response.statusCode !== 200) {
+          clearTimeout(timeout);
+          return resolve({ status: 'error', error: `Download failed: ${response.statusCode}` });
+        }
+
+        const fileStream = fs.createWriteStream(installerPath);
+        response.pipe(fileStream);
+
+        fileStream.on('finish', () => {
+          fileStream.close();
+          clearTimeout(timeout);
+
+          // Execute installer silently and quit app
+          console.log('Downloaded installer to:', installerPath);
+
+          // Close the app gracefully before installing
+          mainWindow.close();
+
+          // Run installer with silent flag
+          execFile(installerPath, ['/S'], (err) => {
+            if (err) {
+              console.error('Installer error:', err);
+              resolve({ status: 'error', error: 'Installation failed: ' + err.message });
+            } else {
+              resolve({ status: 'installed', message: 'Update installed successfully' });
+            }
+
+            // Clean up installer
+            try {
+              fs.unlinkSync(installerPath);
+            } catch (e) {
+              console.error('Failed to clean up installer:', e);
+            }
+          });
+        });
+
+        fileStream.on('error', (err) => {
+          clearTimeout(timeout);
+          resolve({ status: 'error', error: 'Write error: ' + err.message });
+        });
+      }).on('error', (err) => {
+        clearTimeout(timeout);
+        resolve({ status: 'error', error: err.message });
+      });
+    });
+  } catch (err) {
+    return { status: 'error', error: err.message };
+  }
+});
+
+// ─────────────────────────────────────────────
 //  Boot
 // ─────────────────────────────────────────────
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.beetalk.app');
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   createWindow();
   createTray();
+
+  // Auto-check for updates on startup (silent, non-blocking)
+  setTimeout(async () => {
+    try {
+      const result = await performUpdateCheck();
+      if (result?.status === 'update-available') {
+        console.log(`Update available: ${result.version}`);
+        // Notify renderer about update
+        send('update-available', result);
+      }
+    } catch (err) {
+      console.error('Auto-update check failed:', err);
+    }
+  }, 2000); // Wait 2 seconds after window creation
 });
 
 app.on('window-all-closed', () => { /* stay in tray */ });

@@ -225,6 +225,13 @@ ipcRenderer.on('tray-status', (e, show) => {
   }
 });
 
+ipcRenderer.on('update-available', (e, result) => {
+  // Store update info for later use if user opens settings
+  window.pendingUpdate = result;
+  console.log('Update available:', result.version);
+  // Could also show a notification here if desired
+});
+
 // ─────────────────────────────────────────────
 //  Chat helpers
 // ─────────────────────────────────────────────
@@ -1055,6 +1062,19 @@ function showAccountSettingsModal() {
       </div>
     </div>
 
+    <div style="border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
+      <div style="font-weight: 500; margin-bottom: 12px; font-size: 12px; color: var(--text2); text-transform: uppercase;">Updates</div>
+      <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
+        <button class="btn-secondary" id="update-check-btn" onclick="checkForUpdate()">Check for Updates</button>
+        <span id="update-status" style="font-size: 12px; color: var(--text2);"></span>
+      </div>
+      <div id="update-spinner" style="display: none; margin-top: 8px;">
+        <div style="display: inline-block; width: 16px; height: 16px; border: 2px solid var(--text2); border-top: 2px solid var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+        <span style="margin-left: 8px; color: var(--text2); font-size: 12px;">Checking...</span>
+      </div>
+      <div id="update-message" style="display: none; margin-top: 8px; padding: 8px; border-radius: 4px; font-size: 12px;"></div>
+    </div>
+
     <div class="modal-actions">
       <button class="btn-secondary" onclick="hideModal()">Cancel</button>
       <button class="btn-primary"   onclick="submitAccountSettings()">Save</button>
@@ -1088,6 +1108,105 @@ window.submitAccountSettings = () => {
     hideModal();
   } catch (err) {
     console.error('Error saving settings:', err);
+  }
+};
+
+window.checkForUpdate = async () => {
+  const btn = document.getElementById('update-check-btn');
+  const spinner = document.getElementById('update-spinner');
+  const message = document.getElementById('update-message');
+  const status = document.getElementById('update-status');
+
+  if (!btn || !spinner || !message) return;
+
+  // Disable button and show spinner
+  btn.disabled = true;
+  spinner.style.display = 'block';
+  message.style.display = 'none';
+  status.textContent = '';
+
+  try {
+    const result = await ipcRenderer.invoke('check-update', {});
+    console.log('Update check result:', result);
+
+    if (!result) {
+      throw new Error('No response from update checker (null result)');
+    }
+
+    spinner.style.display = 'none';
+
+    if (result.status === 'up-to-date') {
+      message.style.display = 'block';
+      message.textContent = `✓ You're on the latest version (${result.version})`;
+      message.style.backgroundColor = 'rgba(76, 175, 80, 0.1)';
+      message.style.color = '#4CAF50';
+    } else if (result.status === 'update-available') {
+      message.style.display = 'block';
+      message.innerHTML = `
+        <div style="margin-bottom: 8px;">
+          ⬆ Update available: <strong>${result.version}</strong>
+        </div>
+        <div style="font-size: 11px; margin-bottom: 8px; color: var(--text2); max-height: 100px; overflow-y: auto;">
+          ${result.releaseNotes.replace(/\n/g, '<br>')}
+        </div>
+        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" onclick="installUpdate('${result.downloadUrl}', '${result.downloadName}')">Install Now</button>
+      `;
+      message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
+      message.style.color = '#2196F3';
+    } else if (result.status === 'error') {
+      message.style.display = 'block';
+      message.textContent = `✗ Check failed: ${result.error}`;
+      message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
+      message.style.color = '#F44336';
+    }
+  } catch (err) {
+    console.error('Update check error:', err);
+    spinner.style.display = 'none';
+    message.style.display = 'block';
+    message.textContent = `✗ Error: ${err.message}`;
+    message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
+    message.style.color = '#F44336';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+window.installUpdate = async (downloadUrl, downloadName) => {
+  const message = document.getElementById('update-message');
+  const spinner = document.getElementById('update-spinner');
+  const btn = document.getElementById('update-check-btn');
+
+  if (!message || !spinner) return;
+
+  message.style.display = 'none';
+  spinner.style.display = 'block';
+  btn.disabled = true;
+
+  try {
+    const result = await ipcRenderer.invoke('install-update', { downloadUrl, downloadName });
+
+    if (result?.status === 'installed') {
+      spinner.style.display = 'none';
+      message.style.display = 'block';
+      message.textContent = '✓ Update installed. The app will restart.';
+      message.style.backgroundColor = 'rgba(76, 175, 80, 0.1)';
+      message.style.color = '#4CAF50';
+    } else if (result?.status === 'error') {
+      spinner.style.display = 'none';
+      message.style.display = 'block';
+      message.textContent = `✗ Installation failed: ${result.error}`;
+      message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
+      message.style.color = '#F44336';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    console.error('Install error:', err);
+    spinner.style.display = 'none';
+    message.style.display = 'block';
+    message.textContent = `✗ Error: ${err.message}`;
+    message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
+    message.style.color = '#F44336';
+    btn.disabled = false;
   }
 };
 

@@ -30,4 +30,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadEmoticons: () => ipcRenderer.invoke('load-emoticons'),
   loadMessageHistory: (data) => ipcRenderer.invoke('load-message-history', data),
   discoverRooms: (data) => ipcRenderer.invoke('discover-rooms', data),
+  checkUpdate: () => ipcRenderer.invoke('check-update'),
+  installUpdate: (data) => ipcRenderer.invoke('install-update', data),
 });
