@@ -923,6 +923,7 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
 
                 // Close the app after installer starts
                 setTimeout(() => {
+                  app.isQuitting = true;
                   mainWindow.close();
                 }, 1000);
               } catch (err) {
