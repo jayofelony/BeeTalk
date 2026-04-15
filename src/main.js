@@ -925,6 +925,7 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
       };
 
       downloadWithRedirects(downloadUrl);
+    });
   } catch (err) {
     return { status: 'error', error: err.message };
   }
