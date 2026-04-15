@@ -1,6 +1,6 @@
 {
   "name": "beetalk",
-  "version": "1.0.2",
+  "version": "1.0.1",
   "description": "A modern XMPP chat client",
   "author": "JayJ Plaude",
   "main": "src/main.js",
