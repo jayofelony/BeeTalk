@@ -887,7 +887,7 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
         resolve({ status: 'error', error: 'Download timed out' });
-      }, 30000); // 30 second timeout for download
+      }, 120000); // 120 second timeout for download
 
       // Download the installer
       const downloadWithRedirects = (url, redirectCount = 0) => {
