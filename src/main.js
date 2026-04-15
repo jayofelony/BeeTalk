@@ -795,19 +795,19 @@ async function performUpdateCheck() {
                   try {
                     const release = JSON.parse(releaseData);
                     console.log('Parsed release, assets:', release.assets ? release.assets.length : 0);
-                    const exeAsset = release.assets.find(a => a.name.endsWith('.exe'));
+                    const msiAsset = release.assets.find(a => a.name.endsWith('.msi'));
 
-                    if (!exeAsset) {
-                      console.log('No exe asset found');
+                    if (!msiAsset) {
+                      console.log('No msi asset found');
                       resolve({ status: 'error', error: 'No Windows installer found for this tag' });
                     } else {
-                      console.log('Found exe asset:', exeAsset.name);
+                      console.log('Found msi asset:', msiAsset.name);
                       resolve({
                         status: 'update-available',
                         version: latestVersion,
-                        downloadUrl: exeAsset.browser_download_url,
+                        downloadUrl: msiAsset.browser_download_url,
                         releaseNotes: release.body || 'No release notes available',
-                        downloadName: exeAsset.name
+                        downloadName: msiAsset.name
                       });
                     }
                   } catch (err) {
@@ -920,8 +920,8 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
             // Wait a bit for file handles to release, then execute installer
             setTimeout(() => {
               try {
-                // Run installer (detached so it doesn't inherit our locks)
-                const proc = execFile(installerPath, [], {
+                // Run MSI installer with msiexec (detached so it doesn't inherit our locks)
+                const proc = execFile('msiexec.exe', ['/i', installerPath], {
                   detached: true,
                   stdio: 'ignore'
                 }, (err) => {
