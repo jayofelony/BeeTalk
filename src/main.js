@@ -716,7 +716,7 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
 // ─────────────────────────────────────────────
 //  Update checker
 // ─────────────────────────────────────────────
-async function compareVersions(current, latest) {
+function compareVersions(current, latest) {
   const parsePart = (v) => {
     const parts = v.split('.');
     return parts.map(p => parseInt(p, 10) || 0);
@@ -777,7 +777,7 @@ async function performUpdateCheck() {
             const comparison = compareVersions(currentVersion, latestVersion);
             console.log('Version comparison:', currentVersion, 'vs', latestVersion, '=', comparison);
 
-            if (comparison < 0) {
+            if (comparison > 0) {
               console.log('Update available, fetching release info...');
               // Get the release/pre-release info for this tag
               const releaseOptions = {
@@ -866,52 +866,65 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
       }, 30000); // 30 second timeout for download
 
       // Download the installer
-      https.get(downloadUrl, (response) => {
-        if (response.statusCode !== 200) {
+      const downloadWithRedirects = (url, redirectCount = 0) => {
+        if (redirectCount > 5) {
           clearTimeout(timeout);
-          return resolve({ status: 'error', error: `Download failed: ${response.statusCode}` });
+          return resolve({ status: 'error', error: 'Too many redirects' });
         }
 
-        const fileStream = fs.createWriteStream(installerPath);
-        response.pipe(fileStream);
+        https.get(url, (response) => {
+          // Handle redirects
+          if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+            return downloadWithRedirects(response.headers.location, redirectCount + 1);
+          }
 
-        fileStream.on('finish', () => {
-          fileStream.close();
-          clearTimeout(timeout);
+          if (response.statusCode !== 200) {
+            clearTimeout(timeout);
+            return resolve({ status: 'error', error: `Download failed: ${response.statusCode}` });
+          }
 
-          // Execute installer silently and quit app
-          console.log('Downloaded installer to:', installerPath);
+          const fileStream = fs.createWriteStream(installerPath);
+          response.pipe(fileStream);
 
-          // Close the app gracefully before installing
-          mainWindow.close();
+          fileStream.on('finish', () => {
+            fileStream.close();
+            clearTimeout(timeout);
 
-          // Run installer with silent flag
-          execFile(installerPath, ['/S'], (err) => {
-            if (err) {
-              console.error('Installer error:', err);
-              resolve({ status: 'error', error: 'Installation failed: ' + err.message });
-            } else {
-              resolve({ status: 'installed', message: 'Update installed successfully' });
-            }
+            // Execute installer silently and quit app
+            console.log('Downloaded installer to:', installerPath);
 
-            // Clean up installer
-            try {
-              fs.unlinkSync(installerPath);
-            } catch (e) {
-              console.error('Failed to clean up installer:', e);
-            }
+            // Close the app gracefully before installing
+            mainWindow.close();
+
+            // Run installer with silent flag
+            execFile(installerPath, ['/S'], (err) => {
+              if (err) {
+                console.error('Installer error:', err);
+                resolve({ status: 'error', error: 'Installation failed: ' + err.message });
+              } else {
+                resolve({ status: 'installed', message: 'Update installed successfully' });
+              }
+
+              // Clean up installer
+              try {
+                fs.unlinkSync(installerPath);
+              } catch (e) {
+                console.error('Failed to clean up installer:', e);
+              }
+            });
           });
-        });
 
-        fileStream.on('error', (err) => {
+          fileStream.on('error', (err) => {
+            clearTimeout(timeout);
+            resolve({ status: 'error', error: 'Write error: ' + err.message });
+          });
+        }).on('error', (err) => {
           clearTimeout(timeout);
-          resolve({ status: 'error', error: 'Write error: ' + err.message });
+          resolve({ status: 'error', error: err.message });
         });
-      }).on('error', (err) => {
-        clearTimeout(timeout);
-        resolve({ status: 'error', error: err.message });
-      });
-    });
+      };
+
+      downloadWithRedirects(downloadUrl);
   } catch (err) {
     return { status: 'error', error: err.message };
   }
