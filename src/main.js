@@ -920,8 +920,8 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
             // Wait a bit for file handles to release, then execute installer
             setTimeout(() => {
               try {
-                // Run installer with silent flag (detached so it doesn't inherit our locks)
-                const proc = execFile(installerPath, ['/S'], {
+                // Run installer (detached so it doesn't inherit our locks)
+                const proc = execFile(installerPath, [], {
                   detached: true,
                   stdio: 'ignore'
                 }, (err) => {
