@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
+
+  <Product Id="*"
+           Name="BeeTalk"
+           Language="1033"
+           Version="1.0.0.0"
+           Manufacturer="JayJ Plaude"
+           UpgradeCode="12345678-1234-1234-1234-123456789012">
+
+    <Package InstallerVersion="200"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64" />
+
+    <Media Id="1" Cabinet="BeeTalk.cab" EmbedCab="yes" />
+
+    <!-- Search for running BeeTalk process -->
+    <util:ProcessSearch Id="SearchForBeeTalk" ProcessName="BeeTalk.exe" />
+
+    <!-- Show error if app is running -->
+    <Condition Message="BeeTalk is currently running. Please close the application before installing.">
+      <![CDATA[NOT WIX_DOWNGRADE_DETECTED]]>
+    </Condition>
+
+    <!-- Directory structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="BeeTalk" />
+      </Directory>
+    </Directory>
+
+    <Feature Id="ProductFeature" Title="BeeTalk" Level="1" />
+  </Product>
+</Wix>

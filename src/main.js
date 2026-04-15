@@ -917,9 +917,16 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
             console.log('Downloaded installer to:', installerPath);
             console.log('File size:', fs.statSync(installerPath).size);
 
-            // Wait a bit for file handles to release, then execute installer
-            setTimeout(() => {
+            // Cleanup and launch installer
+            (async () => {
               try {
+                // Clean up all connections first
+                await cleanupBeforeUpdate();
+
+                // Wait a moment for cleanup to complete
+                await new Promise(r => setTimeout(r, 500));
+
+                console.log('Starting MSI installer...');
                 // Run MSI installer with msiexec (detached so it doesn't inherit our locks)
                 const proc = execFile('msiexec.exe', ['/i', installerPath], {
                   detached: true,
@@ -927,33 +934,36 @@ ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
                 }, (err) => {
                   if (err) {
                     console.error('Installer error:', err);
-                    resolve({ status: 'error', error: 'Installation failed: ' + err.message });
-                  } else {
-                    resolve({ status: 'installed', message: 'Update installed successfully' });
+                    // Don't resolve here - let msiexec handle it
                   }
+
+                  // Clean up installer file after installer launches
+                  setTimeout(() => {
+                    try {
+                      fs.unlinkSync(installerPath);
+                      console.log('Installer file cleaned up');
+                    } catch (e) {
+                      console.error('Failed to clean up installer:', e);
+                    }
+                  }, 1000);
                 });
 
                 // Unref so this process doesn't keep the app alive
                 proc.unref();
 
-                // Cleanup and close the app after installer starts
-                (async () => {
-                  await cleanupBeforeUpdate();
-                  // Clean up installer file
-                  try {
-                    fs.unlinkSync(installerPath);
-                    console.log('Installer file cleaned up');
-                  } catch (e) {
-                    console.error('Failed to clean up installer:', e);
-                  }
-                  // Now quit the app
+                // Quit the app to let installer proceed
+                resolve({ status: 'installing', message: 'Installer started, closing app...' });
+
+                // Give installer time to start, then quit
+                setTimeout(() => {
+                  console.log('Quitting app for update installation');
                   app.quit();
-                })();
+                }, 1500);
               } catch (err) {
                 console.error('Failed to start installer:', err);
                 resolve({ status: 'error', error: 'Failed to start installer: ' + err.message });
               }
-            }, 500);
+            })();
           });
 
           fileStream.on('error', (err) => {

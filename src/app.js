@@ -107,6 +107,65 @@ function showModal(html) { modalContent.innerHTML = html; modalOverlay.classList
 function hideModal()     { modalOverlay.classList.add('hidden'); modalContent.innerHTML = ''; }
 window.hideModal = hideModal;
 
+function showUpdateAvailableModal(updateInfo) {
+  showModal(`
+    <div class="modal-title">Update Available</div>
+    <div style="margin-bottom: 16px;">
+      <p style="color: var(--text2); margin-bottom: 8px;">
+        A new version is available: <strong style="color: var(--accent);">${esc(updateInfo.version)}</strong>
+      </p>
+      <div style="background: rgba(76, 175, 80, 0.1); border-left: 3px solid #4CAF50; padding: 8px; border-radius: 4px; margin-bottom: 12px;">
+        <div style="font-size: 11px; color: var(--text2); line-height: 1.5; max-height: 150px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; word-wrap: break-word;">
+          ${esc(updateInfo.releaseNotes)}
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="hideModal()">Later</button>
+      <button class="btn-primary" onclick="installUpdateNow('${esc(updateInfo.downloadUrl)}', '${esc(updateInfo.downloadName)}')">Update Now</button>
+    </div>
+  `);
+}
+
+window.installUpdateNow = async (downloadUrl, downloadName) => {
+  showModal(`
+    <div class="modal-title">Installing Update</div>
+    <div style="text-align: center; padding: 20px;">
+      <div style="display: inline-block; width: 32px; height: 32px; border: 3px solid var(--text2); border-top: 3px solid var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
+      <p style="margin-top: 12px; color: var(--text2);">Downloading and installing update...</p>
+    </div>
+  `);
+
+  try {
+    const result = await ipcRenderer.invoke('install-update', { downloadUrl, downloadName });
+    if (result.status === 'installed') {
+      showModal(`
+        <div class="modal-title">Update Complete</div>
+        <p style="color: var(--text2); margin-bottom: 16px;">The update will be installed. The app will close to complete the installation.</p>
+        <div class="modal-actions">
+          <button class="btn-primary" onclick="hideModal()">OK</button>
+        </div>
+      `);
+    } else {
+      showModal(`
+        <div class="modal-title">Update Failed</div>
+        <p style="color: var(--error, #f44336); margin-bottom: 16px;">${esc(result.error)}</p>
+        <div class="modal-actions">
+          <button class="btn-primary" onclick="hideModal()">Close</button>
+        </div>
+      `);
+    }
+  } catch (err) {
+    showModal(`
+      <div class="modal-title">Update Error</div>
+      <p style="color: var(--error, #f44336); margin-bottom: 16px;">${esc(err.message)}</p>
+      <div class="modal-actions">
+        <button class="btn-primary" onclick="hideModal()">Close</button>
+      </div>
+    `);
+  }
+};
+
 // Open external links via IPC
 function openExternalLink(url) {
   ipcRenderer.send('open-link', url);
@@ -226,10 +285,10 @@ ipcRenderer.on('tray-status', (e, show) => {
 });
 
 ipcRenderer.on('update-available', (e, result) => {
-  // Store update info for later use if user opens settings
+  // Store update info and show modal
   window.pendingUpdate = result;
   console.log('Update available:', result.version);
-  // Could also show a notification here if desired
+  showUpdateAvailableModal(result);
 });
 
 // ─────────────────────────────────────────────
