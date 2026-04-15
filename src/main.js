@@ -794,36 +794,31 @@ async function performUpdateCheck() {
                 releaseRes.on('end', () => {
                   try {
                     const release = JSON.parse(releaseData);
-                    console.log('Parsed release, assets:', release.assets ? release.assets.length : 0);
-                    const msiAsset = release.assets.find(a => a.name.endsWith('.msi'));
-
-                    if (!msiAsset) {
-                      console.log('No msi asset found');
-                      resolve({ status: 'error', error: 'No Windows installer found for this tag' });
-                    } else {
-                      console.log('Found msi asset:', msiAsset.name);
-                      resolve({
-                        status: 'update-available',
-                        version: latestVersion,
-                        downloadUrl: msiAsset.browser_download_url,
-                        releaseNotes: release.body || 'No release notes available',
-                        downloadName: msiAsset.name
-                      });
-                    }
+                    console.log('Parsed release');
+                    resolve({
+                      status: 'update-available',
+                      version: latestVersion,
+                      releaseNotes: release.body || 'No release notes available',
+                      releaseUrl: release.html_url || `https://github.com/jayofelony/BeeTalk/releases/tag/${latestTag.name}`
+                    });
                   } catch (err) {
                     console.error('Release parse error:', err.message);
-                    resolve({ status: 'error', error: 'Failed to parse release data: ' + err.message });
+                    resolve({
+                      status: 'update-available',
+                      version: latestVersion,
+                      releaseNotes: 'New version available',
+                      releaseUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/${latestTag.name}`
+                    });
                   }
                 });
               }).on('error', (err) => {
                 console.error('Release request error:', err.message);
-                // If release endpoint fails, just report update available without asset info
+                // If release endpoint fails, just report update available with release page URL
                 resolve({
                   status: 'update-available',
                   version: latestVersion,
-                  downloadUrl: '',
-                  releaseNotes: 'Update available (download from releases page)',
-                  downloadName: ''
+                  releaseNotes: 'Update available',
+                  releaseUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/${latestTag.name}`
                 });
               }).end();
             } else {
@@ -850,143 +845,27 @@ async function performUpdateCheck() {
 
 ipcMain.handle('check-update', performUpdateCheck);
 
-// Cleanup function for graceful shutdown before update
-async function cleanupBeforeUpdate() {
-  try {
-    // Disconnect all XMPP connections
-    for (const id in connections) {
-      try {
-        await destroyConnection(id);
-      } catch (err) {
-        console.error(`Error destroying connection ${id}:`, err);
-      }
-    }
-
-    // Clear all reconnect timers
-    for (const id in reconnectTimers) {
-      clearTimeout(reconnectTimers[id]);
-      delete reconnectTimers[id];
-    }
-
-    console.log('Cleanup complete');
-  } catch (err) {
-    console.error('Error during cleanup:', err);
-  }
-}
-
-ipcMain.handle('install-update', async (e, { downloadUrl, downloadName }) => {
-  try {
-    const https = require('https');
-    const { execFile } = require('child_process');
-    const fs = require('fs');
-    const os = require('os');
-
-    const tempDir = os.tmpdir();
-    const installerPath = path.join(tempDir, downloadName);
-
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        resolve({ status: 'error', error: 'Download timed out' });
-      }, 120000); // 120 second timeout for download
-
-      // Download the installer
-      const downloadWithRedirects = (url, redirectCount = 0) => {
-        if (redirectCount > 5) {
-          clearTimeout(timeout);
-          return resolve({ status: 'error', error: 'Too many redirects' });
-        }
-
-        https.get(url, (response) => {
-          // Handle redirects
-          if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
-            return downloadWithRedirects(response.headers.location, redirectCount + 1);
-          }
-
-          if (response.statusCode !== 200) {
-            clearTimeout(timeout);
-            return resolve({ status: 'error', error: `Download failed: ${response.statusCode}` });
-          }
-
-          const fileStream = fs.createWriteStream(installerPath);
-          response.pipe(fileStream);
-
-          fileStream.on('finish', () => {
-            fileStream.close();
-            clearTimeout(timeout);
-
-            console.log('Downloaded installer to:', installerPath);
-            console.log('File size:', fs.statSync(installerPath).size);
-
-            // Cleanup and launch installer
-            (async () => {
-              try {
-                // Clean up all connections first
-                await cleanupBeforeUpdate();
-
-                // Wait a moment for cleanup to complete
-                await new Promise(r => setTimeout(r, 500));
-
-                console.log('Starting MSI installer...');
-                // Run MSI installer with msiexec (detached so it doesn't inherit our locks)
-                const proc = execFile('msiexec.exe', ['/i', installerPath], {
-                  detached: true,
-                  stdio: 'ignore'
-                }, (err) => {
-                  if (err) {
-                    console.error('Installer error:', err);
-                    // Don't resolve here - let msiexec handle it
-                  }
-
-                  // Clean up installer file after installer launches
-                  setTimeout(() => {
-                    try {
-                      fs.unlinkSync(installerPath);
-                      console.log('Installer file cleaned up');
-                    } catch (e) {
-                      console.error('Failed to clean up installer:', e);
-                    }
-                  }, 1000);
-                });
-
-                // Unref so this process doesn't keep the app alive
-                proc.unref();
-
-                // Quit the app to let installer proceed
-                resolve({ status: 'installing', message: 'Installer started, closing app...' });
-
-                // Give installer time to start, then quit
-                setTimeout(() => {
-                  console.log('Quitting app for update installation');
-                  app.isQuitting = true;
-                  app.quit();
-                }, 1500);
-              } catch (err) {
-                console.error('Failed to start installer:', err);
-                resolve({ status: 'error', error: 'Failed to start installer: ' + err.message });
-              }
-            })();
-          });
-
-          fileStream.on('error', (err) => {
-            clearTimeout(timeout);
-            resolve({ status: 'error', error: 'Write error: ' + err.message });
-          });
-        }).on('error', (err) => {
-          clearTimeout(timeout);
-          resolve({ status: 'error', error: err.message });
-        });
-      };
-
-      downloadWithRedirects(downloadUrl);
-    });
-  } catch (err) {
-    return { status: 'error', error: err.message };
-  }
-});
-
 // ─────────────────────────────────────────────
 //  Boot
 // ─────────────────────────────────────────────
+
+// Ensure only one instance of the app is running
+const gotTheLock = app.requestSingleInstanceLock();
+
+if (!gotTheLock) {
+  // Another instance is already running, quit this one
+  app.quit();
+} else {
+  // Handle the case where someone tried to run a second instance
+  app.on('second-instance', (event, commandLine, workingDirectory) => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+      mainWindow.show();
+    }
+  });
+}
+
 if (process.platform === 'win32') {
   app.setAppUserModelId('com.beetalk.app');
 }
@@ -995,9 +874,8 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
-  // Auto-check for updates on startup (silent, non-blocking)
-  // Wait for renderer to be ready
-  mainWindow.webContents.on('did-finish-load', async () => {
+  // Check for updates 10 seconds after app starts
+  setTimeout(async () => {
     try {
       const result = await performUpdateCheck();
       if (result?.status === 'update-available') {
@@ -1006,15 +884,21 @@ app.whenReady().then(async () => {
         send('update-available', result);
       }
     } catch (err) {
-      console.error('Auto-update check failed:', err);
+      console.error('Update check failed:', err);
     }
-  });
+  }, 10000);
 });
 
 app.on('window-all-closed', () => { /* stay in tray */ });
 app.on('activate', () => mainWindow.show());
 
 app.on('before-quit', async (e) => {
-  // Clean up connections before quitting
-  await cleanupBeforeUpdate();
+  // Disconnect all XMPP connections
+  for (const id in connections) {
+    try {
+      await destroyConnection(id);
+    } catch (err) {
+      console.error(`Error destroying connection ${id}:`, err);
+    }
+  }
 });

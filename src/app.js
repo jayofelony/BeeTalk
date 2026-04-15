@@ -122,48 +122,16 @@ function showUpdateAvailableModal(updateInfo) {
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" onclick="hideModal()">Later</button>
-      <button class="btn-primary" onclick="installUpdateNow('${esc(updateInfo.downloadUrl)}', '${esc(updateInfo.downloadName)}')">Update Now</button>
+      <button class="btn-primary" onclick="openGithubRelease('${esc(updateInfo.releaseUrl)}')">Download Latest Version</button>
     </div>
   `);
 }
 
-window.installUpdateNow = async (downloadUrl, downloadName) => {
-  showModal(`
-    <div class="modal-title">Installing Update</div>
-    <div style="text-align: center; padding: 20px;">
-      <div style="display: inline-block; width: 32px; height: 32px; border: 3px solid var(--text2); border-top: 3px solid var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite;"></div>
-      <p style="margin-top: 12px; color: var(--text2);">Downloading and installing update...</p>
-    </div>
-  `);
-
-  try {
-    const result = await ipcRenderer.invoke('install-update', { downloadUrl, downloadName });
-    if (result.status === 'installed') {
-      showModal(`
-        <div class="modal-title">Update Complete</div>
-        <p style="color: var(--text2); margin-bottom: 16px;">The update will be installed. The app will close to complete the installation.</p>
-        <div class="modal-actions">
-          <button class="btn-primary" onclick="hideModal()">OK</button>
-        </div>
-      `);
-    } else {
-      showModal(`
-        <div class="modal-title">Update Failed</div>
-        <p style="color: var(--error, #f44336); margin-bottom: 16px;">${esc(result.error)}</p>
-        <div class="modal-actions">
-          <button class="btn-primary" onclick="hideModal()">Close</button>
-        </div>
-      `);
-    }
-  } catch (err) {
-    showModal(`
-      <div class="modal-title">Update Error</div>
-      <p style="color: var(--error, #f44336); margin-bottom: 16px;">${esc(err.message)}</p>
-      <div class="modal-actions">
-        <button class="btn-primary" onclick="hideModal()">Close</button>
-      </div>
-    `);
+window.openGithubRelease = (url) => {
+  if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+    openExternalLink(url);
   }
+  hideModal();
 };
 
 // Open external links via IPC
@@ -1234,7 +1202,7 @@ window.checkForUpdate = async () => {
         <div style="font-size: 11px; margin-bottom: 8px; color: var(--text2); max-height: 100px; overflow-y: auto;">
           ${result.releaseNotes.replace(/\n/g, '<br>')}
         </div>
-        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" onclick="installUpdate('${result.downloadUrl}', '${result.downloadName}')">Install Now</button>
+        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" onclick="openExternalLink('${esc(result.releaseUrl)}'); return false;">Download from GitHub</button>
       `;
       message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
       message.style.color = '#2196F3';
@@ -1256,42 +1224,9 @@ window.checkForUpdate = async () => {
   }
 };
 
-window.installUpdate = async (downloadUrl, downloadName) => {
-  const message = document.getElementById('update-message');
-  const spinner = document.getElementById('update-spinner');
-  const btn = document.getElementById('update-check-btn');
-
-  if (!message || !spinner) return;
-
-  message.style.display = 'none';
-  spinner.style.display = 'block';
-  btn.disabled = true;
-
-  try {
-    const result = await ipcRenderer.invoke('install-update', { downloadUrl, downloadName });
-
-    if (result?.status === 'installed') {
-      spinner.style.display = 'none';
-      message.style.display = 'block';
-      message.textContent = '✓ Update installed. The app will restart.';
-      message.style.backgroundColor = 'rgba(76, 175, 80, 0.1)';
-      message.style.color = '#4CAF50';
-    } else if (result?.status === 'error') {
-      spinner.style.display = 'none';
-      message.style.display = 'block';
-      message.textContent = `✗ Installation failed: ${result.error}`;
-      message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
-      message.style.color = '#F44336';
-      btn.disabled = false;
-    }
-  } catch (err) {
-    console.error('Install error:', err);
-    spinner.style.display = 'none';
-    message.style.display = 'block';
-    message.textContent = `✗ Error: ${err.message}`;
-    message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
-    message.style.color = '#F44336';
-    btn.disabled = false;
+window.installUpdate = async (releaseUrl) => {
+  if (typeof releaseUrl === 'string' && /^https?:\/\//.test(releaseUrl)) {
+    openExternalLink(releaseUrl);
   }
 };
 
