@@ -429,7 +429,6 @@ function renderContactList(acct) {
 
     const meta = document.createElement('div');
     meta.className = 'item-meta';
-    if (chat?.lastTs) meta.innerHTML += `<div class="item-time">${formatTime(chat.lastTs)}</div>`;
     if (chat?.newMessagesWhileUnfocused > 0) meta.innerHTML += `<div class="new-messages-badge">${chat.newMessagesWhileUnfocused}</div>`;
     if (chat?.unread > 0) meta.innerHTML += `<div class="unread-badge">${chat.unread}</div>`;
 
@@ -685,9 +684,12 @@ function appendMessage(msg, chat) {
   linkifyUrls(bubble);
   body.appendChild(bubble);
 
-  const timeEl = document.createElement('div');
-  timeEl.className = 'msg-time'; timeEl.textContent = formatDateTime(msg.ts);
-  body.appendChild(timeEl);
+  // Don't show timestamps for directorbot messages
+  if (msg.from !== 'Directorbot') {
+    const timeEl = document.createElement('div');
+    timeEl.className = 'msg-time'; timeEl.textContent = formatDateTime(msg.ts);
+    body.appendChild(timeEl);
+  }
 
   msg.me ? group.append(body, av) : group.append(av, body);
   messagesArea.appendChild(group);

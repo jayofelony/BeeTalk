@@ -1,6 +1,6 @@
 {
   "name": "beetalk",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "A modern XMPP chat client",
   "author": "JayJ Plaude",
   "main": "src/main.js",
@@ -27,16 +27,22 @@
     "win": {
       "target": [
         {
-          "target": "msi",
+          "target": "nsis",
           "arch": ["x64"]
         }
       ],
       "icon": "assets/icon.ico"
     },
-    "msi": {
+    "nsis": {
       "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
+      "createStartMenuShortcut": true,
+      "shortcutName": "BeeTalk",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "runAfterFinish": true
     },
     "mac": {
       "target": [
@@ -66,7 +72,7 @@
         "AppImage",
         "deb"
       ],
-      "icon": "assets/icon.png",
+      "icon": "assets/icon_3.png",
       "category": "Network"
     }
   },

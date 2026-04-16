@@ -268,11 +268,15 @@ function handleStanza(accountId, stanza) {
 
     const from = stanza.attrs.from;
     const type = stanza.attrs.type || 'chat';
+    const senderName = from.split('@')[0];
 
     // Get timestamp from delay element if present (for archived messages), otherwise use now
     let ts = Date.now();
     const delayEl = stanza.getChild('delay', 'urn:xmpp:delay');
-    if (delayEl && delayEl.attrs.stamp) {
+    // For directorbot, don't include timestamps
+    if (senderName === 'directorbot') {
+      ts = 0;
+    } else if (delayEl && delayEl.attrs.stamp) {
       ts = new Date(delayEl.attrs.stamp).getTime();
     }
 
