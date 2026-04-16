@@ -2,7 +2,7 @@
   "name": "beetalk",
   "version": "1.0.3",
   "description": "A modern XMPP chat client",
-  "author": "JayJ Plaude",
+  "author": "JayJ Plaude <beetalk@gmail.com>",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -79,7 +79,6 @@
   "devDependencies": {
     "electron": "^41.2.0",
     "electron-builder": "^26.8.1",
-    "electron-rebuild": "^2.0.3",
     "png-to-ico": "^3.0.1",
     "sharp": "^0.34.5"
   },
