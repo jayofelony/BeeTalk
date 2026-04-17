@@ -1,6 +1,7 @@
 {
   "name": "beetalk",
-  "version": "1.0.3",
+  "productName": "BeeTalk",
+  "version": "1.0.4",
   "description": "A modern XMPP chat client",
   "author": "JayJ Plaude <beetalk@gmail.com>",
   "main": "src/main.js",
@@ -25,6 +26,7 @@
       "package.json"
     ],
     "win": {
+      "executableName": "BeeTalk",
       "target": [
         {
           "target": "nsis",
@@ -39,6 +41,7 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "BeeTalk",
+      "uninstallDisplayName": "BeeTalk",
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico",

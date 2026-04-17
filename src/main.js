@@ -15,6 +15,9 @@ let unreadCount = 0;
 const connections    = {};  // accountId -> { _xmpp, account }
 const reconnectTimers = {}; // accountId -> timer handle
 
+// Ensure OS-level app identity uses BeeTalk instead of the Electron default name.
+app.setName('BeeTalk');
+
 // ─────────────────────────────────────────────
 //  Credential Management (Keytar)
 // ─────────────────────────────────────────────
@@ -64,6 +67,10 @@ async function deletePassword(accountId) {
 //  Window
 // ─────────────────────────────────────────────
 function createWindow() {
+  const windowIconPath = process.platform === 'win32'
+    ? path.join(__dirname, '../assets/icon.ico')
+    : path.join(__dirname, '../assets/icon.png');
+
   mainWindow = new BrowserWindow({
     width: 1100,
     height: 720,
@@ -79,7 +86,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js')
     },
     show: false,
-    icon: path.join(__dirname, '../assets/icon.png')
+    icon: windowIconPath
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
@@ -113,7 +120,7 @@ function createTray() {
   catch { icon = nativeImage.createEmpty(); }
 
   tray = new Tray(icon);
-  tray.setToolTip('Gabber');
+  tray.setToolTip('BeeTalk');
 
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: 'Show', click: () => { mainWindow.show(); mainWindow.focus(); } },
@@ -288,7 +295,7 @@ function handleStanza(accountId, stanza) {
         : from.split('@')[0];
       new Notification({ title: label, body: body.slice(0, 120) }).show();
       unreadCount++;
-      tray && tray.setToolTip(`Gabber (${unreadCount} unread)`);
+      tray && tray.setToolTip(`BeeTalk (${unreadCount} unread)`);
     }
     return;
   }
@@ -857,6 +864,43 @@ ipcMain.handle('get-version', () => {
 //  Boot
 // ─────────────────────────────────────────────
 
+const WINDOWS_APP_ID = 'com.beetalk.app';
+
+// Set Windows app identity globally before creating window.
+if (process.platform === 'win32') {
+  const { nativeImage } = require('electron');
+  const iconPath = path.join(__dirname, '../assets/icon.ico');
+  const icon = nativeImage.createFromPath(iconPath);
+
+  // Use a distinct AppUserModelID in development so Windows doesn't bind
+  // the packaged app to an old "Electron" shortcut created during `npm start`.
+  const appUserModelId = app.isPackaged ? WINDOWS_APP_ID : `${WINDOWS_APP_ID}.dev`;
+  app.setAppUserModelId(appUserModelId);
+}
+
+function cleanupLegacyElectronShortcut() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+
+  try {
+    const fs = require('fs');
+    const electronShortcutPath = path.join(
+      app.getPath('appData'),
+      'Microsoft',
+      'Windows',
+      'Start Menu',
+      'Programs',
+      'Electron.lnk'
+    );
+
+    if (fs.existsSync(electronShortcutPath)) {
+      fs.unlinkSync(electronShortcutPath);
+      console.log('Removed legacy Electron Start Menu shortcut to avoid app identity conflicts.');
+    }
+  } catch (err) {
+    console.warn('Failed to clean up legacy Electron shortcut:', err.message || err);
+  }
+}
+
 // Ensure only one instance of the app is running
 const gotTheLock = app.requestSingleInstanceLock();
 
@@ -874,11 +918,8 @@ if (!gotTheLock) {
   });
 }
 
-if (process.platform === 'win32') {
-  app.setAppUserModelId('com.beetalk.app');
-}
-
 app.whenReady().then(async () => {
+  cleanupLegacyElectronShortcut();
   createWindow();
   createTray();
 
