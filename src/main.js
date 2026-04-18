@@ -2,6 +2,7 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell } = require
 const path = require('path');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
+const { autoUpdater } = require('electron-updater');
 const keytar = require('keytar');
 
 const store = new Store();
@@ -754,134 +755,72 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
 // ─────────────────────────────────────────────
 //  Update checker
 // ─────────────────────────────────────────────
-function compareVersions(current, latest) {
-  const parsePart = (v) => {
-    const parts = v.split('.');
-    return parts.map(p => parseInt(p, 10) || 0);
-  };
-  const curr = parsePart(current);
-  const ltest = parsePart(latest);
+function setupAutoUpdater() {
+  // Configure electron-updater
+  autoUpdater.autoDownload = false;
+  autoUpdater.autoInstallOnAppQuit = true;
 
-  for (let i = 0; i < Math.max(curr.length, ltest.length); i++) {
-    const c = curr[i] || 0;
-    const l = ltest[i] || 0;
-    if (l > c) return 1;  // update available
-    if (l < c) return -1; // current is newer
-  }
-  return 0; // same version
+  autoUpdater.on('checking-for-update', () => {
+    console.log('Checking for updates...');
+  });
+
+  autoUpdater.on('update-available', (info) => {
+    console.log('Update available:', info.version);
+    if (mainWindow) {
+      send('update-available', {
+        status: 'update-available',
+        version: info.version,
+        releaseNotes: info.releaseNotes || 'Update available',
+        releaseUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/v${info.version}`
+      });
+    }
+  });
+
+  autoUpdater.on('update-not-available', () => {
+    console.log('Already up to date');
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('Update error:', err.message);
+  });
+
+  autoUpdater.on('download-progress', (progressObj) => {
+    console.log(`Download progress: ${progressObj.percent}%`);
+    if (mainWindow) {
+      send('update-progress', { percent: progressObj.percent });
+    }
+  });
+
+  autoUpdater.on('update-downloaded', () => {
+    console.log('Update downloaded, will install on quit');
+    if (mainWindow) {
+      send('update-downloaded', {});
+    }
+  });
 }
 
-async function performUpdateCheck() {
+async function checkForUpdates() {
   try {
-    console.log('Starting update check...');
-    const https = require('https');
-    const currentVersion = require('../package.json').version;
-    console.log('Current version:', currentVersion);
-
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        console.log('Update check timed out');
-        resolve({ status: 'error', error: 'Update check timed out' });
-      }, 8000);
-
-      const options = {
-        hostname: 'api.github.com',
-        path: '/repos/jayofelony/BeeTalk/tags?per_page=1',
-        method: 'GET',
-        headers: { 'User-Agent': 'BeeTalk' }
-      };
-
-      console.log('Fetching tags from GitHub...');
-      https.request(options, (res) => {
-        console.log('Got response, status:', res.statusCode);
-        let data = '';
-        res.on('data', chunk => data += chunk);
-        res.on('end', () => {
-          clearTimeout(timeout);
-          console.log('Raw response data:', data.slice(0, 200));
-          try {
-            const tags = JSON.parse(data);
-            console.log('Parsed tags:', tags.length);
-
-            if (!Array.isArray(tags) || tags.length === 0) {
-              console.log('No tags found');
-              resolve({ status: 'error', error: 'No tags found in repository' });
-              return;
-            }
-
-            const latestTag = tags[0];
-            console.log('Latest tag:', latestTag.name);
-            const latestVersion = latestTag.name.replace(/^v/, '');
-            const comparison = compareVersions(currentVersion, latestVersion);
-            console.log('Version comparison:', currentVersion, 'vs', latestVersion, '=', comparison);
-
-            if (comparison > 0) {
-              console.log('Update available, fetching release info...');
-              // Get the release/pre-release info for this tag
-              const releaseOptions = {
-                hostname: 'api.github.com',
-                path: `/repos/jayofelony/BeeTalk/releases/tags/${latestTag.name}`,
-                method: 'GET',
-                headers: { 'User-Agent': 'BeeTalk' }
-              };
-
-              https.request(releaseOptions, (releaseRes) => {
-                console.log('Release response status:', releaseRes.statusCode);
-                let releaseData = '';
-                releaseRes.on('data', chunk => releaseData += chunk);
-                releaseRes.on('end', () => {
-                  try {
-                    const release = JSON.parse(releaseData);
-                    console.log('Parsed release');
-                    resolve({
-                      status: 'update-available',
-                      version: latestVersion,
-                      releaseNotes: release.body || 'No release notes available',
-                      releaseUrl: release.html_url || `https://github.com/jayofelony/BeeTalk/releases/tag/${latestTag.name}`
-                    });
-                  } catch (err) {
-                    console.error('Release parse error:', err.message);
-                    resolve({
-                      status: 'update-available',
-                      version: latestVersion,
-                      releaseNotes: 'New version available',
-                      releaseUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/${latestTag.name}`
-                    });
-                  }
-                });
-              }).on('error', (err) => {
-                console.error('Release request error:', err.message);
-                // If release endpoint fails, just report update available with release page URL
-                resolve({
-                  status: 'update-available',
-                  version: latestVersion,
-                  releaseNotes: 'Update available',
-                  releaseUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/${latestTag.name}`
-                });
-              }).end();
-            } else {
-              console.log('Already up to date');
-              resolve({ status: 'up-to-date', version: currentVersion });
-            }
-          } catch (err) {
-            clearTimeout(timeout);
-            console.error('Tag parse error:', err.message);
-            resolve({ status: 'error', error: 'Failed to parse tag data: ' + err.message });
-          }
-        });
-      }).on('error', (err) => {
-        clearTimeout(timeout);
-        console.error('Tag request error:', err.message);
-        resolve({ status: 'error', error: err.message });
-      }).end();
-    });
+    await autoUpdater.checkForUpdates();
   } catch (err) {
-    console.error('Update check exception:', err.message);
+    console.error('Failed to check for updates:', err.message);
     return { status: 'error', error: err.message };
   }
 }
 
-ipcMain.handle('check-update', performUpdateCheck);
+ipcMain.handle('check-update', checkForUpdates);
+ipcMain.handle('download-update', async () => {
+  try {
+    await autoUpdater.downloadUpdate();
+    return { status: 'downloading' };
+  } catch (err) {
+    console.error('Failed to download update:', err.message);
+    return { status: 'error', error: err.message };
+  }
+});
+ipcMain.handle('install-update', () => {
+  autoUpdater.quitAndInstall();
+});
 
 ipcMain.handle('get-version', () => {
   return require('../package.json').version;
@@ -950,18 +889,12 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
+  // Setup auto-updater
+  setupAutoUpdater();
+
   // Check for updates 10 seconds after app starts
-  setTimeout(async () => {
-    try {
-      const result = await performUpdateCheck();
-      if (result?.status === 'update-available') {
-        console.log(`Update available: ${result.version}`);
-        // Notify renderer about update
-        send('update-available', result);
-      }
-    } catch (err) {
-      console.error('Update check failed:', err);
-    }
+  setTimeout(() => {
+    checkForUpdates().catch(err => console.error('Update check failed:', err));
   }, 10000);
 });
 
