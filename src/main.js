@@ -811,6 +811,19 @@ function setupAutoUpdater() {
   });
 }
 
+function compareVersions(currentVersion, newVersion) {
+  const current = currentVersion.split('.').map(Number);
+  const newer = newVersion.split('.').map(Number);
+
+  for (let i = 0; i < Math.max(current.length, newer.length); i++) {
+    const curr = current[i] || 0;
+    const next = newer[i] || 0;
+    if (next > curr) return true;  // newer version is greater
+    if (next < curr) return false; // current version is greater
+  }
+  return false; // versions are equal
+}
+
 async function checkForUpdates() {
   let result = null;
 
@@ -832,6 +845,8 @@ async function checkForUpdates() {
   if (!result) {
     try {
       const https = require('https');
+      const currentVersion = require('../package.json').version;
+
       const preReleaseInfo = await new Promise((resolve, reject) => {
         https.get('https://api.github.com/repos/jayofelony/BeeTalk/releases', {
           headers: { 'User-Agent': 'BeeTalk' }
@@ -841,16 +856,18 @@ async function checkForUpdates() {
           res.on('end', () => {
             try {
               const releases = JSON.parse(data);
-              // Get the first pre-release (most recent)
-              const prerelease = releases.find(r => r.prerelease);
-              if (prerelease) {
-                resolve({
-                  version: prerelease.tag_name.replace(/^v/, ''),
-                  releaseNotes: prerelease.body || 'Pre-release update'
-                });
-              } else {
-                resolve(null);
+              // Find the first version newer than current
+              for (const release of releases) {
+                const releaseVersion = release.tag_name.replace(/^v/, '');
+                if (compareVersions(currentVersion, releaseVersion)) {
+                  resolve({
+                    version: releaseVersion,
+                    releaseNotes: release.body || 'Pre-release update'
+                  });
+                  return;
+                }
               }
+              resolve(null);
             } catch (e) {
               reject(e);
             }
@@ -860,7 +877,7 @@ async function checkForUpdates() {
 
       if (preReleaseInfo) {
         result = preReleaseInfo;
-        console.log('Found pre-release:', result.version);
+        console.log('Found newer pre-release:', result.version);
         // Emit update-available event for pre-release
         if (mainWindow) {
           send('update-available', {
@@ -878,7 +895,7 @@ async function checkForUpdates() {
   }
 
   if (!result) {
-    return { status: 'error', error: 'No stable or pre-release updates found' };
+    return { status: 'up-to-date' };
   }
   return { status: 'up-to-date' };
 }
