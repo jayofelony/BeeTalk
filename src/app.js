@@ -1405,9 +1405,6 @@ function openDirectMessageWithParticipant(chat, nick) {
 window.openDirectMessageWithParticipant = openDirectMessageWithParticipant;
 window.showParticipantContextMenu = showParticipantContextMenu;
 
-function escapeForJavaScript(str) {
-  return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
 window.leaveRoomConfirm = (accountId, roomJid) => {
   const acct = state.accounts.find(a => a.id === accountId);
   if (acct) leaveRoom(acct, roomJid);

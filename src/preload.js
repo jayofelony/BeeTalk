@@ -16,7 +16,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onXmppRoster: (callback) => ipcRenderer.on('xmpp-roster', callback),
   onXmppMessage: (callback) => ipcRenderer.on('xmpp-message', callback),
   onXmppPresence: (callback) => ipcRenderer.on('xmpp-presence', callback),
-  onXmppParticipants: (callback) => ipcRenderer.on('xmpp-participants', callback),
   onUpdateAvailable: (callback) => ipcRenderer.on('update-available', callback),
 
   // IPC senders
