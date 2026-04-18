@@ -756,8 +756,16 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
 //  Update checker
 // ─────────────────────────────────────────────
 function setupAutoUpdater() {
-  // Configure electron-updater
-  autoUpdater.autoDownload = false;
+  // Configure electron-updater to use GitHub releases
+  autoUpdater.setFeedURL({
+    provider: 'github',
+    owner: 'jayofelony',
+    repo: 'BeeTalk',
+    releaseType: 'release'
+  });
+
+  // Auto-download updates when available, auto-install on quit
+  autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('checking-for-update', () => {

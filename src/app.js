@@ -129,8 +129,7 @@ function showUpdateAvailableModal(updateInfo) {
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" onclick="hideModal()">Later</button>
-      <button class="btn-secondary" onclick="openGithubRelease('${esc(updateInfo.releaseUrl)}')">Download from GitHub</button>
-      <button class="btn-primary" onclick="downloadAndInstallUpdate()">Download & Install</button>
+      <button class="btn-primary" onclick="installUpdate()" id="install-btn" style="display: none;">Install & Restart</button>
     </div>
   `);
 }
@@ -342,6 +341,10 @@ ipcRenderer.on('update-available', (e, result) => {
 });
 
 ipcRenderer.on('update-progress', (e, { percent }) => {
+  const progressDiv = document.getElementById('update-progress');
+  if (progressDiv && progressDiv.style.display !== 'block') {
+    progressDiv.style.display = 'block';
+  }
   const progressBar = document.getElementById('progress-bar');
   const progressText = document.getElementById('progress-text');
   if (progressBar) progressBar.style.width = percent + '%';
