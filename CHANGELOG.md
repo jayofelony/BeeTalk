@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.0.6] - 2026-04-18
+
+### Added
+- **Automatic Delta Updates**: Implemented electron-updater with blockmap support for efficient differential updates
+  - Download only changed blocks instead of full installer (~10-20% of installer size)
+  - Automatic progress tracking during downloads
+  - Seamless install with app restart
+
+### Improved
+- **Update UI**: Enhanced update modal with download progress bar and automatic installation flow
+- **Code Quality**: Removed 7 unused functions, CSS classes, and API exports
+  - Removed unused `escapeForJavaScript()` function
+  - Removed unused `onXmppParticipants` listener
+  - Removed unused `.section-label` CSS class
+  - Removed unused `.avatar.round` CSS modifier
+  - Removed unused update API exports from preload.js
+- **Update Check**: Fixed settings page "Check for Updates" button to work with electron-updater
+
+### Fixed
+- Update check function now properly returns status and works with async event handlers
+- Cleaned up dead code to improve maintainability
+
+### Technical Details
+- Replaced manual GitHub API calls with electron-updater
+- Blockmap files are automatically generated during build (electron-builder)
+- Just upload `.exe` and `.exe.blockmap` to GitHub releases for automatic delta updates
+
 ## [1.0.5] - 2026-04-18
 
 ### Added
@@ -28,3 +55,4 @@
 
 ## [1.0.4] - Previous Release
 - Previous version features and improvements
+
