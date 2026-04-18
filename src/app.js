@@ -1799,22 +1799,9 @@ window.checkForUpdate = async () => {
 
     spinner.style.display = 'none';
 
-    if (result.status === 'up-to-date') {
+    if (result.status === 'checking') {
       message.style.display = 'block';
-      message.textContent = `✓ You're on the latest version (${result.version})`;
-      message.style.backgroundColor = 'rgba(76, 175, 80, 0.1)';
-      message.style.color = '#4CAF50';
-    } else if (result.status === 'update-available') {
-      message.style.display = 'block';
-      message.innerHTML = `
-        <div style="margin-bottom: 8px;">
-          ⬆ Update available: <strong>${result.version}</strong>
-        </div>
-        <div style="font-size: 11px; margin-bottom: 8px; color: var(--text2); max-height: 100px; overflow-y: auto;">
-          ${result.releaseNotes.replace(/\n/g, '<br>')}
-        </div>
-        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" onclick="openExternalLink('${esc(result.releaseUrl)}'); return false;">Download from GitHub</button>
-      `;
+      message.textContent = '⏳ Checking for updates...';
       message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
       message.style.color = '#2196F3';
     } else if (result.status === 'error') {

@@ -802,6 +802,7 @@ function setupAutoUpdater() {
 async function checkForUpdates() {
   try {
     await autoUpdater.checkForUpdates();
+    return { status: 'checking' };
   } catch (err) {
     console.error('Failed to check for updates:', err.message);
     return { status: 'error', error: err.message };
