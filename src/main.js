@@ -811,18 +811,7 @@ function setupAutoUpdater() {
   });
 }
 
-function compareVersions(currentVersion, newVersion) {
-  const current = currentVersion.split('.').map(Number);
-  const newer = newVersion.split('.').map(Number);
-
-  for (let i = 0; i < Math.max(current.length, newer.length); i++) {
-    const curr = current[i] || 0;
-    const next = newer[i] || 0;
-    if (next > curr) return true;  // newer version is greater
-    if (next < curr) return false; // current version is greater
-  }
-  return false; // versions are equal
-}
+let pendingUpdateInfo = null; // Store update info for download
 
 async function checkForUpdates() {
   let result = null;
@@ -884,6 +873,11 @@ async function checkForUpdates() {
       if (tagInfo) {
         result = tagInfo;
         console.log('Found newer tag:', result.version);
+        // Store update info for download
+        pendingUpdateInfo = {
+          version: result.version,
+          downloadUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/v${result.version}`
+        };
         // Emit update-available event for tag
         if (mainWindow) {
           send('update-available', {
@@ -910,11 +904,63 @@ async function checkForUpdates() {
 ipcMain.handle('check-update', checkForUpdates);
 ipcMain.handle('download-update', async () => {
   try {
+    // Try to download using autoUpdater first (for official releases)
     await autoUpdater.downloadUpdate();
     return { status: 'downloading' };
   } catch (err) {
-    console.error('Failed to download update:', err.message);
-    return { status: 'error', error: err.message };
+    console.error('autoUpdater download failed:', err.message);
+
+    // If we have pending update info (from tag-based check), fetch release assets and download
+    if (pendingUpdateInfo) {
+      try {
+        const https = require('https');
+
+        // Fetch release info for this tag
+        const releaseInfo = await new Promise((resolve, reject) => {
+          https.get(`https://api.github.com/repos/jayofelony/BeeTalk/releases/tags/v${pendingUpdateInfo.version}`, {
+            headers: { 'User-Agent': 'BeeTalk' }
+          }, (res) => {
+            let data = '';
+            res.on('data', chunk => data += chunk);
+            res.on('end', () => {
+              try {
+                resolve(JSON.parse(data));
+              } catch (e) {
+                reject(e);
+              }
+            });
+          }).on('error', reject);
+        });
+
+        if (releaseInfo && releaseInfo.assets && releaseInfo.assets.length > 0) {
+          console.log('Found release assets for', pendingUpdateInfo.version);
+          // Let autoUpdater know about this release
+          // Try setting feed URL to the specific release and re-check
+          autoUpdater.setFeedURL({
+            provider: 'github',
+            owner: 'jayofelony',
+            repo: 'BeeTalk',
+            releaseType: 'all'  // Include all release types
+          });
+
+          // Trigger download with the release info
+          await autoUpdater.downloadUpdate();
+          return { status: 'downloading' };
+        }
+      } catch (assetErr) {
+        console.log('Could not fetch release assets:', assetErr.message);
+      }
+
+      // Fallback: open the release page
+      const { shell } = require('electron');
+      shell.openExternal(pendingUpdateInfo.downloadUrl);
+      return {
+        status: 'error',
+        error: 'Opening release page. Please download and install manually.'
+      };
+    }
+
+    return { status: 'error', error: 'Update download not available' };
   }
 });
 ipcMain.handle('install-update', () => {
