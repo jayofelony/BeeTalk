@@ -833,7 +833,7 @@ async function checkForUpdates() {
   } catch (err) {
     // If we get a 406 or "Unable to find latest version" error, it means no stable releases exist
     if (err.message && (err.message.includes('Unable to find latest version') || err.statusCode === 406)) {
-      console.log('No stable release found, checking pre-releases...');
+      console.log('No stable release found, checking tags...');
     } else {
       // Other errors should be reported
       console.error('Failed to check for stable releases:', err.message);
@@ -841,28 +841,28 @@ async function checkForUpdates() {
     }
   }
 
-  // If no stable release found, try checking pre-releases
+  // If no stable release found, try checking tags
   if (!result) {
     try {
       const https = require('https');
       const currentVersion = require('../package.json').version;
 
-      const preReleaseInfo = await new Promise((resolve, reject) => {
-        https.get('https://api.github.com/repos/jayofelony/BeeTalk/releases', {
+      const tagInfo = await new Promise((resolve, reject) => {
+        https.get('https://api.github.com/repos/jayofelony/BeeTalk/tags', {
           headers: { 'User-Agent': 'BeeTalk' }
         }, (res) => {
           let data = '';
           res.on('data', chunk => data += chunk);
           res.on('end', () => {
             try {
-              const releases = JSON.parse(data);
-              // Find the first version newer than current
-              for (const release of releases) {
-                const releaseVersion = release.tag_name.replace(/^v/, '');
-                if (compareVersions(currentVersion, releaseVersion)) {
+              const tags = JSON.parse(data);
+              // Find the first tag version newer than current
+              for (const tag of tags) {
+                const tagVersion = tag.name.replace(/^v/, '');
+                if (compareVersions(currentVersion, tagVersion)) {
                   resolve({
-                    version: releaseVersion,
-                    releaseNotes: release.body || 'Pre-release update'
+                    version: tagVersion,
+                    releaseNotes: `New version available: ${tagVersion}`
                   });
                   return;
                 }
@@ -875,10 +875,10 @@ async function checkForUpdates() {
         }).on('error', reject);
       });
 
-      if (preReleaseInfo) {
-        result = preReleaseInfo;
-        console.log('Found newer pre-release:', result.version);
-        // Emit update-available event for pre-release
+      if (tagInfo) {
+        result = tagInfo;
+        console.log('Found newer tag:', result.version);
+        // Emit update-available event for tag
         if (mainWindow) {
           send('update-available', {
             status: 'update-available',
@@ -889,8 +889,8 @@ async function checkForUpdates() {
         }
       }
     } catch (err) {
-      console.log('Pre-release check failed:', err.message);
-      return { status: 'error', error: 'No releases available' };
+      console.log('Tag check failed:', err.message);
+      return { status: 'error', error: 'Failed to check for updates' };
     }
   }
 
