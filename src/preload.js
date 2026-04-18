@@ -16,7 +16,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onXmppRoster: (callback) => ipcRenderer.on('xmpp-roster', callback),
   onXmppMessage: (callback) => ipcRenderer.on('xmpp-message', callback),
   onXmppPresence: (callback) => ipcRenderer.on('xmpp-presence', callback),
-  onUpdateAvailable: (callback) => ipcRenderer.on('update-available', callback),
 
   // IPC senders
   xmppConnect: (account) => ipcRenderer.send('xmpp-connect', account),
@@ -33,5 +32,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadEmoticons: () => ipcRenderer.invoke('load-emoticons'),
   loadMessageHistory: (data) => ipcRenderer.invoke('load-message-history', data),
   discoverRooms: (data) => ipcRenderer.invoke('discover-rooms', data),
-  checkUpdate: () => ipcRenderer.invoke('check-update'),
 });
