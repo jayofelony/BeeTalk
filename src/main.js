@@ -811,6 +811,19 @@ function setupAutoUpdater() {
   });
 }
 
+function compareVersions(currentVersion, newVersion) {
+  const current = currentVersion.split('.').map(Number);
+  const newer = newVersion.split('.').map(Number);
+
+  for (let i = 0; i < Math.max(current.length, newer.length); i++) {
+    const curr = current[i] || 0;
+    const next = newer[i] || 0;
+    if (next > curr) return true;  // newer version is greater
+    if (next < curr) return false; // current version is greater
+  }
+  return false; // versions are equal
+}
+
 let pendingUpdateInfo = null; // Store update info for download
 
 async function checkForUpdates() {
