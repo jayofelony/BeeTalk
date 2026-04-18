@@ -16,12 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onXmppRoster: (callback) => ipcRenderer.on('xmpp-roster', callback),
   onXmppMessage: (callback) => ipcRenderer.on('xmpp-message', callback),
   onXmppPresence: (callback) => ipcRenderer.on('xmpp-presence', callback),
+  onXmppParticipants: (callback) => ipcRenderer.on('xmpp-participants', callback),
   onUpdateAvailable: (callback) => ipcRenderer.on('update-available', callback),
-  onUpdateProgress: (callback) => ipcRenderer.on('update-progress', callback),
-  onUpdateDownloaded: (callback) => ipcRenderer.on('update-downloaded', callback),
-  onTrayStatus: (callback) => ipcRenderer.on('tray-status', callback),
-  onAppFocus: (callback) => ipcRenderer.on('app-focus', callback),
-  onAppBlur: (callback) => ipcRenderer.on('app-blur', callback),
 
   // IPC senders
   xmppConnect: (account) => ipcRenderer.send('xmpp-connect', account),
@@ -39,6 +35,4 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadMessageHistory: (data) => ipcRenderer.invoke('load-message-history', data),
   discoverRooms: (data) => ipcRenderer.invoke('discover-rooms', data),
   checkUpdate: () => ipcRenderer.invoke('check-update'),
-  downloadUpdate: () => ipcRenderer.invoke('download-update'),
-  installUpdate: () => ipcRenderer.invoke('install-update'),
 });

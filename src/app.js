@@ -119,37 +119,19 @@ function showUpdateAvailableModal(updateInfo) {
           ${esc(updateInfo.releaseNotes)}
         </div>
       </div>
-      <div id="update-progress" style="display: none; margin-bottom: 12px;">
-        <div style="font-size: 11px; margin-bottom: 4px;">Downloading update...</div>
-        <div style="background: var(--bg2); height: 4px; border-radius: 2px; overflow: hidden;">
-          <div id="progress-bar" style="background: var(--accent); height: 100%; width: 0%; transition: width 0.3s;"></div>
-        </div>
-        <div id="progress-text" style="font-size: 10px; color: var(--text3); margin-top: 4px; text-align: center;">0%</div>
-      </div>
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" onclick="hideModal()">Later</button>
-      <button class="btn-primary" onclick="downloadAndInstallUpdate()" id="download-btn">Download & Install</button>
-      <button class="btn-primary" onclick="installUpdate()" id="install-btn" style="display: none;">Install & Restart</button>
+      <button class="btn-primary" onclick="openGithubRelease('${esc(updateInfo.releaseUrl)}')">Download Latest Version</button>
     </div>
   `);
 }
 
-window.downloadAndInstallUpdate = async () => {
-  try {
-    const downloadBtn = document.getElementById('download-btn');
-    const progressDiv = document.getElementById('update-progress');
-    const actions = document.querySelector('.modal-actions');
-
-    if (downloadBtn) downloadBtn.disabled = true;
-    if (progressDiv) progressDiv.style.display = 'block';
-
-    await ipcRenderer.invoke('download-update');
-  } catch (err) {
-    console.error('Failed to download update:', err);
-    const downloadBtn = document.getElementById('download-btn');
-    if (downloadBtn) downloadBtn.disabled = false;
+window.openGithubRelease = (url) => {
+  if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+    openExternalLink(url);
   }
+  hideModal();
 };
 
 // Open external links via IPC
@@ -342,51 +324,6 @@ ipcRenderer.on('update-available', (e, result) => {
   console.log('Update available:', result.version);
   showUpdateAvailableModal(result);
 });
-
-ipcRenderer.on('update-progress', (e, { percent }) => {
-  const progressDiv = document.getElementById('update-progress');
-  if (progressDiv && progressDiv.style.display !== 'block') {
-    progressDiv.style.display = 'block';
-  }
-  const progressBar = document.getElementById('progress-bar');
-  const progressText = document.getElementById('progress-text');
-  if (progressBar) progressBar.style.width = percent + '%';
-  if (progressText) progressText.textContent = Math.round(percent) + '%';
-});
-
-ipcRenderer.on('update-downloaded', (e) => {
-  const modal = document.querySelector('.modal');
-  if (modal) {
-    const title = modal.querySelector('.modal-title');
-    const content = modal.querySelector('div:nth-child(2)');
-    const actions = modal.querySelector('.modal-actions');
-    if (title) title.textContent = 'Update Downloaded';
-    if (content) {
-      content.innerHTML = '<p style="color: var(--text2);">Update downloaded successfully!</p>';
-    }
-    if (actions) {
-      actions.innerHTML = `
-        <button class="btn-secondary" onclick="hideModal()">Later</button>
-        <button class="btn-primary" onclick="installUpdate()">Install & Restart</button>
-      `;
-    }
-  }
-});
-
-window.installUpdate = async () => {
-  try {
-    await ipcRenderer.invoke('install-update');
-  } catch (err) {
-    console.error('Failed to install update:', err);
-  }
-};
-
-window.openGithubRelease = (url) => {
-  if (typeof url === 'string' && /^https?:\/\//.test(url)) {
-    openExternalLink(url);
-  }
-  hideModal();
-};
 
 // ─────────────────────────────────────────────
 //  Chat helpers
@@ -1411,6 +1348,9 @@ function openDirectMessageWithParticipant(chat, nick) {
 window.openDirectMessageWithParticipant = openDirectMessageWithParticipant;
 window.showParticipantContextMenu = showParticipantContextMenu;
 
+function escapeForJavaScript(str) {
+  return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
 window.leaveRoomConfirm = (accountId, roomJid) => {
   const acct = state.accounts.find(a => a.id === accountId);
   if (acct) leaveRoom(acct, roomJid);
@@ -1805,19 +1745,27 @@ window.checkForUpdate = async () => {
 
     spinner.style.display = 'none';
 
-    if (result.status === 'checking') {
+    if (result.status === 'up-to-date') {
       message.style.display = 'block';
-      message.textContent = '⏳ Checking for updates...';
-      message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
-      message.style.color = '#2196F3';
-    } else if (result.status === 'up-to-date') {
-      message.style.display = 'block';
-      message.textContent = '✓ You are up to date';
+      message.textContent = `✓ You're on the latest version (${result.version})`;
       message.style.backgroundColor = 'rgba(76, 175, 80, 0.1)';
       message.style.color = '#4CAF50';
+    } else if (result.status === 'update-available') {
+      message.style.display = 'block';
+      message.innerHTML = `
+        <div style="margin-bottom: 8px;">
+          ⬆ Update available: <strong>${result.version}</strong>
+        </div>
+        <div style="font-size: 11px; margin-bottom: 8px; color: var(--text2); max-height: 100px; overflow-y: auto;">
+          ${result.releaseNotes.replace(/\n/g, '<br>')}
+        </div>
+        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" onclick="openExternalLink('${esc(result.releaseUrl)}'); return false;">Download from GitHub</button>
+      `;
+      message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
+      message.style.color = '#2196F3';
     } else if (result.status === 'error') {
       message.style.display = 'block';
-      message.innerHTML = `✗ Check failed: <div style="font-family: monospace; margin-top: 4px; padding: 8px; background: var(--bg2); border-radius: 4px; max-height: 200px; overflow-y: auto; word-break: break-word; white-space: pre-wrap;">${result.error}</div>`;
+      message.textContent = `✗ Check failed: ${result.error}`;
       message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
       message.style.color = '#F44336';
     }
@@ -1825,7 +1773,7 @@ window.checkForUpdate = async () => {
     console.error('Update check error:', err);
     spinner.style.display = 'none';
     message.style.display = 'block';
-    message.innerHTML = `✗ Error: <div style="font-family: monospace; margin-top: 4px; padding: 8px; background: var(--bg2); border-radius: 4px; max-height: 200px; overflow-y: auto; word-break: break-word; white-space: pre-wrap;">${err.message}</div>`;
+    message.textContent = `✗ Error: ${err.message}`;
     message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
     message.style.color = '#F44336';
   } finally {
@@ -1833,9 +1781,15 @@ window.checkForUpdate = async () => {
   }
 };
 
+window.installUpdate = async (releaseUrl) => {
+  if (typeof releaseUrl === 'string' && /^https?:\/\//.test(releaseUrl)) {
+    openExternalLink(releaseUrl);
+  }
+};
+
 // ─────────────────────────────────────────────
 //  Persistence
-//  ─────────────────────────────────────────────
+// ─────────────────────────────────────────────
 function saveAccounts() {
   const safe = state.accounts.map(({ id, username, password, server, port, displayName, color }) =>
     ({ id, username, password, server, port, displayName, color })

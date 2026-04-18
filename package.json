@@ -1,7 +1,7 @@
 {
   "name": "beetalk",
   "productName": "BeeTalk",
-  "version": "1.0.7",
+  "version": "1.0.5",
   "description": "A modern XMPP chat client",
   "author": "JayJ Plaude <beetalk@gmail.com>",
   "main": "src/main.js",
@@ -87,8 +87,7 @@
   },
   "dependencies": {
     "@xmpp/client": "^0.13.0",
-    "electron-store": "^8.1.0",
-    "electron-updater": "^6.1.1"
+    "electron-store": "^8.1.0"
   },
   "overrides": {
     "file-type": "^22.0.0"

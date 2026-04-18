@@ -265,6 +265,15 @@ html, body {
 
 #contact-list, #room-list { flex: 1; padding: 6px 6px; }
 
+.section-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text3);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 10px 8px 4px;
+}
+
 .contact-item, .room-item {
   display: flex;
   align-items: center;
@@ -390,6 +399,7 @@ html, body {
   text-transform: uppercase;
 }
 .avatar.sm { width: 28px; height: 28px; border-radius: 8px; font-size: 11px; }
+.avatar.round { border-radius: 50%; }
 
 /* avatar colors */
 .av-0 { background: #3b4baa; color: #aab4f8; }
