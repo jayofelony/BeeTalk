@@ -760,8 +760,7 @@ function setupAutoUpdater() {
   autoUpdater.setFeedURL({
     provider: 'github',
     owner: 'jayofelony',
-    repo: 'BeeTalk',
-    releaseType: 'release'
+    repo: 'BeeTalk'
   });
 
   // Auto-download updates when available, auto-install on quit
@@ -789,6 +788,11 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('error', (err) => {
+    // Silently ignore "Unable to find latest version" - this is normal when only pre-releases exist
+    if (err.message && err.message.includes('Unable to find latest version')) {
+      console.log('No stable release found (only pre-releases available)');
+      return;
+    }
     console.error('Update error:', err.message);
   });
 
@@ -808,13 +812,75 @@ function setupAutoUpdater() {
 }
 
 async function checkForUpdates() {
+  let result = null;
+
+  // Try to check for stable releases first
   try {
-    await autoUpdater.checkForUpdates();
-    return { status: 'checking' };
+    result = await autoUpdater.checkForUpdates();
   } catch (err) {
-    console.error('Failed to check for updates:', err.message);
-    return { status: 'error', error: err.message };
+    // If we get a 406 or "Unable to find latest version" error, it means no stable releases exist
+    if (err.message && (err.message.includes('Unable to find latest version') || err.statusCode === 406)) {
+      console.log('No stable release found, checking pre-releases...');
+    } else {
+      // Other errors should be reported
+      console.error('Failed to check for stable releases:', err.message);
+      return { status: 'error', error: err.message };
+    }
   }
+
+  // If no stable release found, try checking pre-releases
+  if (!result) {
+    try {
+      const https = require('https');
+      const preReleaseInfo = await new Promise((resolve, reject) => {
+        https.get('https://api.github.com/repos/jayofelony/BeeTalk/releases', {
+          headers: { 'User-Agent': 'BeeTalk' }
+        }, (res) => {
+          let data = '';
+          res.on('data', chunk => data += chunk);
+          res.on('end', () => {
+            try {
+              const releases = JSON.parse(data);
+              // Get the first pre-release (most recent)
+              const prerelease = releases.find(r => r.prerelease);
+              if (prerelease) {
+                resolve({
+                  version: prerelease.tag_name.replace(/^v/, ''),
+                  releaseNotes: prerelease.body || 'Pre-release update'
+                });
+              } else {
+                resolve(null);
+              }
+            } catch (e) {
+              reject(e);
+            }
+          });
+        }).on('error', reject);
+      });
+
+      if (preReleaseInfo) {
+        result = preReleaseInfo;
+        console.log('Found pre-release:', result.version);
+        // Emit update-available event for pre-release
+        if (mainWindow) {
+          send('update-available', {
+            status: 'update-available',
+            version: result.version,
+            releaseNotes: result.releaseNotes,
+            releaseUrl: `https://github.com/jayofelony/BeeTalk/releases/tag/v${result.version}`
+          });
+        }
+      }
+    } catch (err) {
+      console.log('Pre-release check failed:', err.message);
+      return { status: 'error', error: 'No releases available' };
+    }
+  }
+
+  if (!result) {
+    return { status: 'error', error: 'No stable or pre-release updates found' };
+  }
+  return { status: 'up-to-date' };
 }
 
 ipcMain.handle('check-update', checkForUpdates);

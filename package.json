@@ -1,7 +1,7 @@
 {
   "name": "beetalk",
   "productName": "BeeTalk",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A modern XMPP chat client",
   "author": "JayJ Plaude <beetalk@gmail.com>",
   "main": "src/main.js",

@@ -1807,9 +1807,14 @@ window.checkForUpdate = async () => {
       message.textContent = '⏳ Checking for updates...';
       message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
       message.style.color = '#2196F3';
+    } else if (result.status === 'up-to-date') {
+      message.style.display = 'block';
+      message.textContent = '✓ You are up to date';
+      message.style.backgroundColor = 'rgba(76, 175, 80, 0.1)';
+      message.style.color = '#4CAF50';
     } else if (result.status === 'error') {
       message.style.display = 'block';
-      message.textContent = `✗ Check failed: ${result.error}`;
+      message.innerHTML = `✗ Check failed: <div style="font-family: monospace; margin-top: 4px; padding: 8px; background: var(--bg2); border-radius: 4px; max-height: 200px; overflow-y: auto; word-break: break-word; white-space: pre-wrap;">${result.error}</div>`;
       message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
       message.style.color = '#F44336';
     }
@@ -1817,7 +1822,7 @@ window.checkForUpdate = async () => {
     console.error('Update check error:', err);
     spinner.style.display = 'none';
     message.style.display = 'block';
-    message.textContent = `✗ Error: ${err.message}`;
+    message.innerHTML = `✗ Error: <div style="font-family: monospace; margin-top: 4px; padding: 8px; background: var(--bg2); border-radius: 4px; max-height: 200px; overflow-y: auto; word-break: break-word; white-space: pre-wrap;">${err.message}</div>`;
     message.style.backgroundColor = 'rgba(244, 67, 54, 0.1)';
     message.style.color = '#F44336';
   } finally {
