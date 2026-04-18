@@ -846,6 +846,7 @@ async function checkForUpdates() {
     try {
       const https = require('https');
       const currentVersion = require('../package.json').version;
+      console.log('Current version:', currentVersion);
 
       const tagInfo = await new Promise((resolve, reject) => {
         https.get('https://api.github.com/repos/jayofelony/BeeTalk/tags', {
@@ -856,10 +857,13 @@ async function checkForUpdates() {
           res.on('end', () => {
             try {
               const tags = JSON.parse(data);
+              console.log('Fetched tags:', tags.map(t => t.name));
               // Find the first tag version newer than current
               for (const tag of tags) {
                 const tagVersion = tag.name.replace(/^v/, '');
+                console.log(`Comparing ${currentVersion} with ${tagVersion}:`, compareVersions(currentVersion, tagVersion));
                 if (compareVersions(currentVersion, tagVersion)) {
+                  console.log('Found newer version:', tagVersion);
                   resolve({
                     version: tagVersion,
                     releaseNotes: `New version available: ${tagVersion}`
@@ -867,8 +871,10 @@ async function checkForUpdates() {
                   return;
                 }
               }
+              console.log('No newer version found');
               resolve(null);
             } catch (e) {
+              console.error('Tag parsing error:', e);
               reject(e);
             }
           });
@@ -889,8 +895,9 @@ async function checkForUpdates() {
         }
       }
     } catch (err) {
-      console.log('Tag check failed:', err.message);
-      return { status: 'error', error: 'Failed to check for updates' };
+      console.error('Tag check error:', err.message);
+      console.error('Tag check error stack:', err);
+      return { status: 'error', error: 'Failed to check for updates: ' + err.message };
     }
   }
 

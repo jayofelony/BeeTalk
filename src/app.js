@@ -129,6 +129,7 @@ function showUpdateAvailableModal(updateInfo) {
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" onclick="hideModal()">Later</button>
+      <button class="btn-primary" onclick="downloadAndInstallUpdate()" id="download-btn">Download & Install</button>
       <button class="btn-primary" onclick="installUpdate()" id="install-btn" style="display: none;">Install & Restart</button>
     </div>
   `);
@@ -136,16 +137,18 @@ function showUpdateAvailableModal(updateInfo) {
 
 window.downloadAndInstallUpdate = async () => {
   try {
+    const downloadBtn = document.getElementById('download-btn');
     const progressDiv = document.getElementById('update-progress');
     const actions = document.querySelector('.modal-actions');
-    if (progressDiv && actions) {
-      progressDiv.style.display = 'block';
-      actions.style.display = 'none';
-    }
+
+    if (downloadBtn) downloadBtn.disabled = true;
+    if (progressDiv) progressDiv.style.display = 'block';
+
     await ipcRenderer.invoke('download-update');
   } catch (err) {
     console.error('Failed to download update:', err);
-    hideModal();
+    const downloadBtn = document.getElementById('download-btn');
+    if (downloadBtn) downloadBtn.disabled = false;
   }
 };
 
