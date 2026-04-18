@@ -287,6 +287,33 @@ html, body {
 .contact-item:hover, .room-item:hover { background: var(--bg2); }
 .contact-item.active, .room-item.active { background: var(--accent-dim); }
 
+.group-header {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text2);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  gap: 8px;
+  transition: color 0.2s, background 0.1s;
+}
+.group-header:hover {
+  background: var(--bg2);
+  color: var(--text1);
+}
+.group-header .group-arrow {
+  display: inline-block;
+  width: 12px;
+  text-align: center;
+  transition: transform 0.2s;
+}
+.group-header.collapsed .group-arrow {
+  transform: rotate(-90deg);
+}
+
 .item-info { flex: 1; min-width: 0; }
 .item-name {
   font-size: 13px;
@@ -714,6 +741,19 @@ img[src$=".gif"] {
   transition: background 0.15s;
 }
 .btn-danger:hover { background: rgba(224,85,85,0.12); }
+
+.btn-group-option {
+  padding: 8px 14px;
+  background: var(--bg3);
+  color: var(--text1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-group-option:hover { background: var(--bg4); border-color: var(--accent); color: var(--accent); }
+.btn-group-option:active { transform: scale(0.98); }
 
 /* ── Error/info strip ── */
 .strip {

@@ -262,7 +262,8 @@ function handleStanza(accountId, stanza) {
       const contacts = query.getChildren('item').map(item => ({
         jid:          item.attrs.jid,
         name:         item.attrs.name || item.attrs.jid.split('@')[0],
-        subscription: item.attrs.subscription
+        subscription: item.attrs.subscription,
+        groups:       item.getChildren('group').map(g => g.getText())
       }));
       send('xmpp-roster', { accountId, contacts });
     }
@@ -345,12 +346,38 @@ ipcMain.on('xmpp-send-presence', (e, { accountId, show, status }) => {
   c._xmpp.send(xml('presence', {}, ...kids)).catch(() => {});
 });
 
+
 ipcMain.on('xmpp-add-contact', (e, { accountId, jid, name }) => {
   const c = connections[accountId];
   if (!c) return;
   // Send subscription request
   c._xmpp.send(xml('presence', { to: jid, type: 'subscribe' })).catch(() => {});
 });
+
+ipcMain.on('xmpp-update-contact-groups', (e, { accountId, jid, name, groups }) => {
+  const c = connections[accountId];
+  if (!c) return;
+  // Send roster update IQ with new groups
+  const groupElements = groups.map(groupName => xml('group', {}, groupName));
+  const item = xml('item', { jid, name: name || jid }, ...groupElements);
+  const query = xml('query', { xmlns: 'jabber:iq:roster' }, item);
+  const iq = xml('iq', { type: 'set', id: 'roster-' + Date.now() }, query);
+  c._xmpp.send(iq).catch(() => {});
+});
+
+ipcMain.on('xmpp-remove-contact', (e, { accountId, jid }) => {
+  const c = connections[accountId];
+  if (!c) return;
+  // Remove from roster with subscription='remove'
+  const item = xml('item', { jid, subscription: 'remove' });
+  const query = xml('query', { xmlns: 'jabber:iq:roster' }, item);
+  const iq = xml('iq', { type: 'set', id: 'roster-' + Date.now() }, query);
+  c._xmpp.send(iq).catch(() => {});
+  // Send unsubscribe and unsubscribed
+  c._xmpp.send(xml('presence', { to: jid, type: 'unsubscribe' })).catch(() => {});
+  c._xmpp.send(xml('presence', { to: jid, type: 'unsubscribed' })).catch(() => {});
+});
+
 
 ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick }) => {
   const c = connections[accountId];
