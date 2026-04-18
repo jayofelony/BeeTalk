@@ -32,6 +32,12 @@ const ipcRenderer = {
 };
 
 // ─────────────────────────────────────────────
+//  Config
+// ─────────────────────────────────────────────
+const MAX_DISPLAYED_MESSAGES_ROOM = 500;  // Max messages rendered in a room (keeps history, just limits display)
+const RENDER_BATCH_SIZE = 50;  // Messages to render per animation frame
+
+// ─────────────────────────────────────────────
 //  State
 // ─────────────────────────────────────────────
 const state = {
@@ -339,6 +345,12 @@ function pushMessage(key, msg) {
   const chat = state.chats[key];
   if (!chat) return;
   chat.messages.push(msg);
+  
+  // For rooms, enforce max message limit in memory (keep only recent messages)
+  if (chat.type === 'room' && chat.messages.length > MAX_DISPLAYED_MESSAGES_ROOM * 2) {
+    chat.messages = chat.messages.slice(-MAX_DISPLAYED_MESSAGES_ROOM);
+  }
+  
   chat.lastTs      = msg.ts;
   chat.lastPreview = (msg.me ? 'You: ' : '') + msg.text;
 
@@ -876,37 +888,70 @@ function openChat(key) {
   chat.unread = 0;
 
   messagesArea.innerHTML = '';
+
+  // For rooms: limit displayed messages to avoid performance issues
+  let messagesToRender = chat.messages;
+  let truncated = false;
+  if (isRoom && chat.messages.length > MAX_DISPLAYED_MESSAGES_ROOM) {
+    messagesToRender = chat.messages.slice(-MAX_DISPLAYED_MESSAGES_ROOM);
+    truncated = true;
+    // Add truncation notice
+    const notice = document.createElement('div');
+    notice.className = 'system-msg';
+    notice.style.textAlign = 'center';
+    notice.style.opacity = '0.6';
+    notice.style.marginTop = '16px';
+    notice.innerHTML = `⚠ Showing last ${MAX_DISPLAYED_MESSAGES_ROOM.toLocaleString()} messages (${(chat.messages.length - MAX_DISPLAYED_MESSAGES_ROOM).toLocaleString()} older hidden)`;
+    messagesArea.appendChild(notice);
+  }
+
+  // Render messages incrementally to avoid UI blocking
   let lastDay = null;
-
-  chat.messages.forEach(msg => {
-    if (msg.system) {
-      const el = document.createElement('div');
-      el.className = 'system-msg'; el.textContent = msg.text;
-      messagesArea.appendChild(el); return;
+  let renderIndex = 0;
+  
+  function renderNextBatch() {
+    const endIdx = Math.min(renderIndex + RENDER_BATCH_SIZE, messagesToRender.length);
+    
+    for (let i = renderIndex; i < endIdx; i++) {
+      const msg = messagesToRender[i];
+      if (msg.system) {
+        const el = document.createElement('div');
+        el.className = 'system-msg'; el.textContent = msg.text;
+        messagesArea.appendChild(el);
+        continue;
+      }
+      const day = formatDay(msg.ts);
+      if (day !== lastDay) {
+        lastDay = day;
+        const d = document.createElement('div');
+        d.className = 'day-divider'; d.textContent = day;
+        messagesArea.appendChild(d);
+      }
+      appendMessage(msg, chat);
     }
-    const day = formatDay(msg.ts);
-    if (day !== lastDay) {
-      lastDay = day;
-      const d = document.createElement('div');
-      d.className = 'day-divider'; d.textContent = day;
-      messagesArea.appendChild(d);
+    
+    renderIndex = endIdx;
+    
+    if (renderIndex < messagesToRender.length) {
+      // Schedule next batch
+      requestAnimationFrame(renderNextBatch);
+    } else {
+      // All messages rendered, apply emoticons
+      const bubbles = messagesArea.querySelectorAll('.msg-bubble');
+      bubbles.forEach(bubble => {
+        applyEmoticons(bubble);
+        linkifyUrls(bubble);
+      });
+      
+      // Scroll after all done
+      requestAnimationFrame(() => {
+        scrollToBottom();
+      });
     }
-    appendMessage(msg, chat);
-  });
+  }
+  
+  renderNextBatch();
 
-  // Apply emoticons to all messages
-  const bubbles = messagesArea.querySelectorAll('.msg-bubble');
-  bubbles.forEach(bubble => {
-    applyEmoticons(bubble);
-    linkifyUrls(bubble);
-  });
-
-  // Scroll after DOM is rendered
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      scrollToBottom();
-    });
-  });
   markChatAsRead(key);  // Mark all messages as read
   welcomeScreen.style.display = 'none';
   chatArea.style.display = 'flex';
