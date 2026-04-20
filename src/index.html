@@ -45,6 +45,10 @@
         </div>
         <button id="btn-settings" title="Settings">&#9881;</button>
       </div>
+      <div id="connection-status-bar" style="display: none; background: rgba(255,100,100,0.1); border: 1px solid rgba(255,100,100,0.3); border-radius: 4px; padding: 8px 12px; margin-top: 8px; text-align: center;">
+        <div style="font-size: 12px; color: var(--text2); margin-bottom: 6px;">Connection failed</div>
+        <button id="btn-reconnect" class="btn-secondary" style="width: 100%; padding: 6px 12px; font-size: 12px;">Reconnect</button>
+      </div>
       <div id="search-bar">
         <input id="search-input" placeholder="Search contacts &amp; rooms…" />
       </div>
@@ -57,6 +61,9 @@
 
     <div id="contacts-panel" class="tab-panel active">
       <div id="contact-list"></div>
+      <div id="add-contact-input" style="padding: 8px 6px; border-top: 1px solid var(--border);">
+        <input type="text" id="new-contact-username" placeholder="Add contact (username only)..." style="width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg2); color: var(--text1); font-size: 13px; outline: none; transition: border-color 0.2s;" onFocus="this.style.borderColor='var(--accent)'" onBlur="this.style.borderColor='var(--border)'" />
+      </div>
     </div>
 
     <div id="rooms-panel" class="tab-panel">

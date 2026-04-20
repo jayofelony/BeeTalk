@@ -36,6 +36,7 @@ const ipcRenderer = {
 // ─────────────────────────────────────────────
 const MAX_DISPLAYED_MESSAGES_ROOM = 500;  // Max messages rendered in a room (keeps history, just limits display)
 const RENDER_BATCH_SIZE = 50;  // Messages to render per animation frame
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000;  // 10 minutes of inactivity before auto-away
 
 // ─────────────────────────────────────────────
 //  State
@@ -46,7 +47,9 @@ const state = {
   chats: {},          // chatKey -> { type, name, jid, accountId, messages[], unread, newMessagesWhileUnfocused, participants, myNick }
   activeChatKey: null,
   search: '',
-  appIsFocused: true  // track whether app window is focused
+  appIsFocused: true, // track whether app window is focused
+  idleTimer: null,
+  userIsIdle: false
 };
 
 // ─────────────────────────────────────────────
@@ -70,6 +73,8 @@ const curAvatar      = $('cur-avatar');
 const modalOverlay   = $('modal-overlay');
 const modalContent   = $('modal-content');
 const searchInput    = $('search-input');
+const connectionStatusBar = $('connection-status-bar');
+const btnReconnect   = $('btn-reconnect');
 
 // ─────────────────────────────────────────────
 //  Utilities
@@ -112,6 +117,36 @@ function bareJid(jid) { return jid ? jid.split('/')[0] : ''; }
 function showModal(html) { modalContent.innerHTML = html; modalOverlay.classList.remove('hidden'); }
 function hideModal()     { modalOverlay.classList.add('hidden'); modalContent.innerHTML = ''; }
 window.hideModal = hideModal;
+
+// ─────────────────────────────────────────────
+//  Idle Detection (Auto-away)
+// ─────────────────────────────────────────────
+function resetIdleTimer() {
+  // Clear existing timer
+  if (state.idleTimer) clearTimeout(state.idleTimer);
+
+  // If user was idle, set them back to available
+  if (state.userIsIdle) {
+    state.userIsIdle = false;
+    const acct = getActiveAccount();
+    if (acct && acct.status === 'online' && acct.presence === 'away') {
+      ipcRenderer.send('xmpp-send-presence', { accountId: acct.id, show: 'available', status: '' });
+      acct.presence = 'available';
+      renderLeftPanel();
+    }
+  }
+
+  // Set new timer for idle detection
+  state.idleTimer = setTimeout(() => {
+    state.userIsIdle = true;
+    const acct = getActiveAccount();
+    if (acct && acct.status === 'online' && acct.presence !== 'away' && acct.presence !== 'dnd') {
+      ipcRenderer.send('xmpp-send-presence', { accountId: acct.id, show: 'away', status: 'Away (idle)' });
+      acct.presence = 'away';
+      renderLeftPanel();
+    }
+  }, IDLE_TIMEOUT_MS);
+}
 
 function showUpdateAvailableModal(updateInfo) {
   showModal(`
@@ -269,10 +304,11 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
     // Auto-open Directorbot chat
     openChat(key);
 
-    // Play alarm if enabled
+    // Play alarm if enabled and not in Do Not Disturb mode
     const settings = getAppSettings();
-    if (settings.alarmEnabled !== false) {
-      playAlarmSound();
+    const acct = state.accounts.find(a => a.id === accountId);
+    if (settings.alarmEnabled !== false && acct?.presence !== 'dnd') {
+      playNotificationSound({ beepCount: 3, baseFrequency: 800, frequencyIncrement: 200, beepDuration: 0.2, gapDuration: 0.1, volume: 0.3 });
       ipcRenderer.send('window-focus');
     }
     return;
@@ -291,6 +327,12 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
     const displayName = acct?.roster?.[senderBareJid]?.name || senderName;
     ensureChat(key, { type: 'dm', name: displayName, jid: senderBareJid, accountId });
     pushMessage(key, { from: displayName, text: body, ts, me: false });
+
+    // Play sound for DM notifications if enabled and not in Do Not Disturb mode
+    const settings = getAppSettings();
+    if (settings.dmSoundEnabled !== false && acct?.presence !== 'dnd') {
+      playNotificationSound({ beepCount: 2, baseFrequency: 600, frequencyIncrement: 0, beepDuration: 0.15, gapDuration: 0.08, volume: 0.25 });
+    }
   }
 });
 
@@ -497,9 +539,13 @@ function renderLeftPanel() {
 
     curStatusText.textContent = statusText;
     curStatusDot.className = 'status-dot ' + (s === 'online' ? 'dot-green' : s === 'connecting' ? 'dot-amber' : s === 'authfail' || s === 'error' ? 'dot-red' : 'dot-gray');
+
+    // Show connection status bar if there's an error or auth failure
+    connectionStatusBar.style.display = (s === 'error' || s === 'authfail') ? 'block' : 'none';
   } else {
     curJid.textContent = 'No account'; curAvatar.className = 'avatar av-0'; curAvatar.textContent = '?';
     curStatusText.textContent = 'Offline'; curStatusDot.className = 'status-dot dot-gray';
+    connectionStatusBar.style.display = 'none';
   }
   renderContactList(acct);
   renderRoomList(acct);
@@ -537,7 +583,12 @@ function renderContactList(acct) {
 
     const meta = document.createElement('div');
     meta.className = 'item-meta';
-    if (chat?.newMessagesWhileUnfocused > 0) meta.innerHTML += `<div class="new-messages-badge">${chat.newMessagesWhileUnfocused}</div>`;
+    // Directorbot uses system message styling (orange badge)
+    if (chat?.newMessagesWhileUnfocused > 0) {
+      const div = document.createElement('div');
+      div.innerHTML = `<div class="new-messages-badge" style="background: #FF9800; color: white; font-weight: bold; font-size: 11px; padding: 2px 6px; border-radius: 12px; min-width: 20px; text-align: center;">${chat.newMessagesWhileUnfocused}</div>`;
+      meta.appendChild(div.firstElementChild);
+    }
     if (chat?.unread > 0) meta.innerHTML += `<div class="unread-badge">${chat.unread}</div>`;
 
     el.append(av, info, meta);
@@ -672,7 +723,11 @@ function renderContactList(acct) {
         const meta = document.createElement('div');
         meta.className = 'item-meta';
         if (chat?.lastTs)   meta.innerHTML += `<div class="item-time">${formatTime(chat.lastTs)}</div>`;
-        if (chat?.newMessagesWhileUnfocused > 0) meta.innerHTML += `<div class="new-messages-badge">${chat.newMessagesWhileUnfocused}</div>`;
+        if (chat?.newMessagesWhileUnfocused > 0) {
+          const div = document.createElement('div');
+          div.innerHTML = getBadgeStyle(chat);
+          meta.appendChild(div.firstElementChild);
+        }
         if (chat?.unread > 0) meta.innerHTML += `<div class="unread-badge">${chat.unread}</div>`;
 
         el.append(av, info, meta);
@@ -813,7 +868,11 @@ function renderRoomList(acct) {
         const meta = document.createElement('div');
         meta.className = 'item-meta';
         if (chat.lastTs)  meta.innerHTML += `<div class="item-time">${formatTime(chat.lastTs)}</div>`;
-        if (chat.newMessagesWhileUnfocused > 0) meta.innerHTML += `<div class="new-messages-badge">${chat.newMessagesWhileUnfocused}</div>`;
+        if (chat.newMessagesWhileUnfocused > 0) {
+          const div = document.createElement('div');
+          div.innerHTML = getBadgeStyle(chat);
+          meta.appendChild(div.firstElementChild);
+        }
         if (chat.unread > 0) meta.innerHTML += `<div class="unread-badge">${chat.unread}</div>`;
 
         el.append(av, info, meta);
@@ -1276,43 +1335,8 @@ function showContactContextMenu(contact, acct) {
 
 
 function showParticipantContextMenu(chat, nick) {
-  const acct = state.accounts.find(a => a.id === chat.accountId);
-  if (!acct) return;
-
-  const roomServer = chat.jid.split('@')[1];
-  const participantJid = nick.toLowerCase() + '@' + roomServer;
-  const isContact = acct.roster && acct.roster[participantJid];
-
-  const contextMenu = document.getElementById('context-menu');
-  contextMenu.innerHTML = '';
-
-  // Send DM option
-  const dmItem = document.createElement('div');
-  dmItem.className = 'context-menu-item';
-  dmItem.textContent = '💬 Send DM';
-  dmItem.addEventListener('click', () => {
-    openDirectMessageWithParticipant(chat, nick);
-    hideContextMenu();
-  });
-  contextMenu.appendChild(dmItem);
-
-  // Add to contacts option (only if not already a contact)
-  if (!isContact) {
-    const addItem = document.createElement('div');
-    addItem.className = 'context-menu-item';
-    addItem.textContent = '➕ Add to contacts';
-    addItem.addEventListener('click', () => {
-      addParticipantToContacts(acct.id, participantJid, nick, chat);
-      hideContextMenu();
-    });
-    contextMenu.appendChild(addItem);
-  }
-
-  // Show context menu at cursor position
-  const e = window.currentContextEvent;
-  if (e) {
-    showContextMenu(e);
-  }
+  // Participant context menu disabled for now
+  hideContextMenu();
 }
 
 function showContextMenu(e) {
@@ -1671,6 +1695,7 @@ function showAccountSettingsModal() {
   const settings = getAppSettings();
   const theme = settings.theme || 'dark';
   const alarmEnabled = settings.alarmEnabled !== false;  // Default to true
+  const dmSoundEnabled = settings.dmSoundEnabled !== false;  // Default to true
 
   showModal(`
     <div class="modal-title">Account Settings</div>
@@ -1714,6 +1739,10 @@ function showAccountSettingsModal() {
         <input type="checkbox" id="fi-alarm-enabled" ${alarmEnabled ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
         <label for="fi-alarm-enabled" style="cursor: pointer; margin: 0;">Play alarm for Directorbot messages</label>
       </div>
+      <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+        <input type="checkbox" id="fi-dm-sound-enabled" ${dmSoundEnabled ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
+        <label for="fi-dm-sound-enabled" style="cursor: pointer; margin: 0;">Play sound for direct messages</label>
+      </div>
     </div>
 
     <div style="border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
@@ -1743,6 +1772,7 @@ window.submitAccountSettings = () => {
     const status = document.getElementById('fi-status-msg')?.value.trim() || '';
     const theme = document.getElementById('fi-theme')?.value || 'dark';
     const alarmEnabled = document.getElementById('fi-alarm-enabled')?.checked ?? true;
+    const dmSoundEnabled = document.getElementById('fi-dm-sound-enabled')?.checked ?? true;
 
     const acct = getActiveAccount();
     if (acct) {
@@ -1756,7 +1786,7 @@ window.submitAccountSettings = () => {
     }
 
     // Save app settings
-    saveAppSettings({ theme, alarmEnabled });
+    saveAppSettings({ theme, alarmEnabled, dmSoundEnabled });
     setTheme(theme);
 
     renderLeftPanel();
@@ -2025,6 +2055,19 @@ function insertEmoticon(name) {
   addRecentEmoticon(name);
 }
 
+function toggleFavoriteEmoticon(name) {
+  const settings = getAppSettings();
+  let favorites = settings.favoriteEmoticons || [];
+  if (favorites.includes(name)) {
+    favorites = favorites.filter(e => e !== name);
+  } else {
+    favorites = [...favorites, name];
+  }
+  saveAppSettings({ favoriteEmoticons: favorites });
+  // Refresh the emoticon picker
+  showEmoticonPicker();
+}
+
 function showEmoticonPicker() {
   if (!Object.keys(emoticons).length) {
     showModal(`
@@ -2051,13 +2094,15 @@ function showEmoticonPicker() {
       <div style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; margin-bottom: 16px; padding: 8px; background: var(--bg2); border-radius: var(--radius);">
         ${recent.map(name => {
           const emoticon = emoticonsList.find(e => e.name === name);
+          const isFavorite = favorites.includes(name);
           return emoticon ? `
-            <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none;"
-              onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)';"
-              onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)';"
+            <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
+              onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
+              onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
               onclick="insertEmoticon('${esc(name)}'); hideModal();"
               title="${esc(name)}">
               <img src="${emoticon.path}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
+              <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
             </div>
           ` : '';
         }).join('')}
@@ -2073,12 +2118,13 @@ function showEmoticonPicker() {
         ${favorites.map(name => {
           const emoticon = emoticonsList.find(e => e.name === name);
           return emoticon ? `
-            <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none;"
-              onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)';"
-              onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)';"
+            <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
+              onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
+              onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
               onclick="insertEmoticon('${esc(name)}'); hideModal();"
               title="${esc(name)}">
               <img src="${emoticon.path}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
+              <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(name)}')" title="Toggle favorite">★</div>
             </div>
           ` : '';
         }).join('')}
@@ -2101,16 +2147,21 @@ function showEmoticonPicker() {
       `).join('')}
     </div>
     <div id="emoticon-grid" style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; padding: 8px; background: var(--bg2); border-radius: var(--radius); max-height: 400px; overflow-y: auto;">
-      ${emoticons[folders[0]]?.map(e => `
-        <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none;"
-          onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)';"
-          onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)';"
+      ${emoticons[folders[0]]?.map(e => {
+        const favorites = (getAppSettings().favoriteEmoticons || []);
+        const isFavorite = favorites.includes(e.name);
+        return `
+        <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
+          onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
+          onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
           onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
           data-name="${esc(e.name)}"
           title="${esc(e.name)}">
           <img src="${esc(e.path)}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
+          <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
         </div>
-      `).join('') || ''}
+      `;
+      }).join('') || ''}
     </div>
   </div>`;
 
@@ -2130,28 +2181,38 @@ function showEmoticonPicker() {
 
       if (query === '') {
         const activeFolder = document.querySelector('[data-folder][style*="var(--accent)"]')?.dataset.folder || folders[0];
-        grid.innerHTML = emoticons[activeFolder]?.map(e => `
-          <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none;"
-            onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)';"
-            onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)';"
+        grid.innerHTML = emoticons[activeFolder]?.map(e => {
+          const favorites = (getAppSettings().favoriteEmoticons || []);
+          const isFavorite = favorites.includes(e.name);
+          return `
+          <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
+            onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
+            onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
             onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
             data-name="${esc(e.name)}"
             title="${esc(e.name)}">
             <img src="${esc(e.path)}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
+            <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
           </div>
-        `).join('') || '';
+        `;
+        }).join('') || ''
       } else {
         const filtered = emoticonsList.filter(e => e.name.toLowerCase().includes(query));
-        grid.innerHTML = filtered.map(e => `
-          <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none;"
-            onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)';"
-            onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)';"
+        grid.innerHTML = filtered.map(e => {
+          const favorites = (getAppSettings().favoriteEmoticons || []);
+          const isFavorite = favorites.includes(e.name);
+          return `
+          <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
+            onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
+            onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
             onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
             data-name="${esc(e.name)}"
             title="${esc(e.name)}">
             <img src="${esc(e.path)}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
+          <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
           </div>
-        `).join('');
+        `;
+        }).join('');
       }
     });
     searchInput.focus();
@@ -2166,16 +2227,21 @@ function switchEmoticonFolder(folder, event) {
     btn.style.background = btn.dataset.folder === folder ? 'var(--accent)' : 'var(--bg2)';
   });
 
-  grid.innerHTML = emoticons[folder]?.map(e => `
-    <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none;"
-      onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)';"
-      onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)';"
+  grid.innerHTML = emoticons[folder]?.map(e => {
+    const favorites = (getAppSettings().favoriteEmoticons || []);
+    const isFavorite = favorites.includes(e.name);
+    return `
+    <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
+      onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
+      onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
       onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
       data-name="${esc(e.name)}"
       title="${esc(e.name)}">
       <img src="${e.path}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
+      <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
     </div>
-  `).join('') || '';
+  `;
+  }).join('') || ''
 }
 
 function addRecentEmoticon(name) {
@@ -2186,7 +2252,41 @@ function addRecentEmoticon(name) {
   saveAppSettings({ recentEmoticons: newRecent });
 }
 
+function togglePinnedChat(chatKey) {
+  const settings = getAppSettings();
+  let pinnedChats = settings.pinnedChats || [];
+  if (pinnedChats.includes(chatKey)) {
+    pinnedChats = pinnedChats.filter(k => k !== chatKey);
+  } else {
+    pinnedChats = [chatKey, ...pinnedChats];
+  }
+  saveAppSettings({ pinnedChats });
+  renderLeftPanel();
+}
+
+function getBadgeStyle(chat) {
+  // Return different badge styles based on chat type and content
+  if (chat.type === 'dm') {
+    // DMs get a blue badge
+    return `
+      <div class="new-messages-badge" style="background: #2196F3; color: white; font-weight: bold; font-size: 11px; padding: 2px 6px; border-radius: 12px; min-width: 20px; text-align: center;">
+        ${chat.newMessagesWhileUnfocused}
+      </div>
+    `;
+  } else if (chat.type === 'room') {
+    // Room messages get a green badge
+    return `
+      <div class="new-messages-badge" style="background: #4CAF50; color: white; font-weight: bold; font-size: 11px; padding: 2px 6px; border-radius: 12px; min-width: 20px; text-align: center;">
+        ${chat.newMessagesWhileUnfocused}
+      </div>
+    `;
+  }
+  // Default badge
+  return `<div class="new-messages-badge">${chat.newMessagesWhileUnfocused}</div>`;
+}
+
 window.insertEmoticon = insertEmoticon;
+window.toggleFavoriteEmoticon = toggleFavoriteEmoticon;
 window.switchEmoticonFolder = switchEmoticonFolder;
 
 async function loadEmoticons() {
@@ -2228,24 +2328,29 @@ async function loadMessageHistory(key) {
   }
 }
 
-function playAlarmSound() {
+function playNotificationSound(options = {}) {
   try {
+    const {
+      beepCount = 2,
+      baseFrequency = 600,
+      frequencyIncrement = 0,
+      beepDuration = 0.15,
+      gapDuration = 0.08,
+      volume = 0.25
+    } = options;
+
     const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-
-    // Create a simple alarm sound: 3 beeps
     const now = audioContext.currentTime;
-    const beepDuration = 0.2;
-    const gapDuration = 0.1;
 
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < beepCount; i++) {
       const startTime = now + (i * (beepDuration + gapDuration));
 
       const osc = audioContext.createOscillator();
-      osc.frequency.value = 800 + (i * 200); // Increasing frequency
+      osc.frequency.value = baseFrequency + (i * frequencyIncrement);
       osc.type = 'sine';
 
       const gain = audioContext.createGain();
-      gain.gain.setValueAtTime(0.3, startTime);
+      gain.gain.setValueAtTime(volume, startTime);
       gain.gain.exponentialRampToValueAtTime(0.01, startTime + beepDuration);
 
       osc.connect(gain);
@@ -2255,8 +2360,17 @@ function playAlarmSound() {
       osc.stop(startTime + beepDuration);
     }
   } catch (err) {
-    console.error('Failed to play alarm sound:', err);
+    console.error('Failed to play notification sound:', err);
   }
+}
+
+// Backwards compatibility aliases
+function playAlarmSound() {
+  playNotificationSound({ beepCount: 3, baseFrequency: 800, frequencyIncrement: 200, beepDuration: 0.2, gapDuration: 0.1, volume: 0.3 });
+}
+
+function playDMSound() {
+  playNotificationSound({ beepCount: 2, baseFrequency: 600, frequencyIncrement: 0, beepDuration: 0.15, gapDuration: 0.08, volume: 0.25 });
 }
 
 function showBrowseRoomsModal() {
@@ -2426,11 +2540,66 @@ $('btn-add-account').addEventListener('click',  showAddAccountModal);
 $('btn-welcome-add').addEventListener('click',  showAddAccountModal);
 $('btn-browse-rooms').addEventListener('click',  showBrowseRoomsModal);
 $('btn-settings').addEventListener('click',     showAccountSettingsModal);
+btnReconnect.addEventListener('click', () => {
+  const acct = getActiveAccount();
+  if (acct) {
+    ipcRenderer.send('xmpp-connect', acct);
+  }
+});
 $('btn-emoticon').addEventListener('click',     showEmoticonPicker);
 $('btn-send').addEventListener('click', sendMessage);
 
 msgInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 msgInput.addEventListener('input',   () => { msgInput.style.height = 'auto'; msgInput.style.height = Math.min(msgInput.scrollHeight, 130) + 'px'; });
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  // Ctrl/Cmd + N: Add new account
+  if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+    e.preventDefault();
+    showAddAccountModal();
+  }
+
+  // Ctrl/Cmd + F: Focus search
+  if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+    e.preventDefault();
+    searchInput.focus();
+  }
+
+  // Ctrl/Cmd + K: Focus message input
+  if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+    e.preventDefault();
+    msgInput.focus();
+  }
+
+  // Ctrl/Cmd + ,: Open settings
+  if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+    e.preventDefault();
+    showAccountSettingsModal();
+  }
+
+  // Ctrl/Cmd + 1-9: Switch to account by number
+  if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key)) {
+    e.preventDefault();
+    const accountNum = parseInt(e.key) - 1;
+    if (state.accounts[accountNum]) {
+      state.activeAccountId = state.accounts[accountNum].id;
+      renderLeftPanel();
+    }
+  }
+
+  // Reset idle timer on any key press
+  resetIdleTimer();
+});
+
+// Track user activity for idle detection
+document.addEventListener('mousemove', resetIdleTimer, true);
+document.addEventListener('mousedown', resetIdleTimer, true);
+document.addEventListener('keypress', resetIdleTimer, true);
+document.addEventListener('touchstart', resetIdleTimer, true);
+
+// Initialize idle timer
+resetIdleTimer();
 
 document.querySelectorAll('.ltab').forEach(tab => {
   tab.addEventListener('click', () => {
@@ -2445,6 +2614,57 @@ searchInput.addEventListener('input', () => {
   state.search = searchInput.value.toLowerCase().trim();
   renderLeftPanel();
 });
+
+// Add contact from username input
+const newContactInput = document.getElementById('new-contact-username');
+if (newContactInput) {
+  newContactInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') {
+      const username = newContactInput.value.trim();
+      if (!username) {
+        showModal(`
+          <div class="modal-title">Error</div>
+          <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Please enter a username.</p>
+          <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+        `);
+        return;
+      }
+
+      const acct = getActiveAccount();
+      if (!acct) {
+        showModal(`
+          <div class="modal-title">Error</div>
+          <p style="color:var(--text3);font-size:13px;margin-bottom:16px">No active account selected.</p>
+          <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+        `);
+        return;
+      }
+
+      // Append @goonfleet if not already present
+      const jid = username.includes('@') ? username : username + '@goonfleet';
+      const displayName = username.split('@')[0];
+
+      // Add contact via XMPP
+      ipcRenderer.send('xmpp-add-contact', { accountId: acct.id, jid, name: displayName });
+
+      // Add to local roster
+      if (!acct.roster) acct.roster = {};
+      acct.roster[jid] = { jid, name: displayName, presence: 'offline', groups: [] };
+
+      // Save to localStorage
+      saveRoster(acct.id, acct.roster);
+
+      addSystemMsg(null, acct.id, `📋 Subscription request sent to ${displayName}`);
+      newContactInput.value = '';
+      renderLeftPanel();
+      showModal(`
+        <div class="modal-title">✓ Added</div>
+        <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Subscription request sent to ${esc(displayName)}.</p>
+        <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+      `);
+    }
+  });
+}
 
 // Close context menu when clicking elsewhere
 document.addEventListener('click', (e) => {
