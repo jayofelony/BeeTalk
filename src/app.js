@@ -336,7 +336,7 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
   }
 });
 
-ipcRenderer.on('xmpp-presence', (e, { accountId, from, type, show }) => {
+ipcRenderer.on('xmpp-presence', (e, { accountId, from, type, show, mucJid }) => {
   const acct = state.accounts.find(a => a.id === accountId);
   if (!acct || !acct.roster) return;
   const jid = bareJid(from);
@@ -352,7 +352,7 @@ ipcRenderer.on('xmpp-presence', (e, { accountId, from, type, show }) => {
     if (chat && chat.type === 'room') {
       chat.participants = chat.participants || {};
       if (type === 'unavailable') delete chat.participants[nick];
-      else chat.participants[nick] = show || 'available';
+      else chat.participants[nick] = { presence: show || 'available', mucJid: mucJid };
       if (state.activeChatKey === key) renderParticipants(chat);
     }
   }
@@ -1055,7 +1055,14 @@ function appendMessage(msg, chat) {
 
   if (!msg.me && chat.type === 'room') {
     const sn = document.createElement('div');
-    sn.className = 'msg-sender-name'; sn.textContent = msg.from;
+    sn.className = 'msg-sender-name'; 
+    sn.textContent = msg.from;
+    sn.style.cursor = 'pointer';
+    sn.addEventListener('contextmenu', function(e) {
+      e.preventDefault();
+      window.currentContextEvent = e;
+      showMessageSenderContextMenu(chat, msg);
+    });
     body.appendChild(sn);
   }
 
@@ -1064,6 +1071,12 @@ function appendMessage(msg, chat) {
   bubble.textContent = parseEmoticons(msg.text);
   applyEmoticons(bubble);
   linkifyUrls(bubble);
+  bubble.style.cursor = 'context-menu';
+  bubble.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+    window.currentContextEvent = e;
+    showMessageContextMenu(msg);
+  });
   body.appendChild(bubble);
 
   // Don't show timestamps for directorbot messages
@@ -1093,7 +1106,8 @@ function renderParticipants(chat) {
     av.textContent = nick.slice(0, 2).toUpperCase();
 
     // Add status indicator
-    const presence = chat.participants[nick] || 'available';
+    const partData = chat.participants[nick];
+    const presence = (typeof partData === 'string') ? partData : (partData?.presence || 'available');
     const statusPip = document.createElement('span');
     const statusClass = presence !== 'offline' ? 'dot-green' : 'dot-gray';
     statusPip.className = 'contact-status-pip ' + statusClass;
@@ -1335,33 +1349,159 @@ function showContactContextMenu(contact, acct) {
 
 
 function showParticipantContextMenu(chat, nick) {
-  // Participant context menu disabled for now
-  hideContextMenu();
+  const acct = state.accounts.find(a => a.id === chat.accountId);
+  if (!acct) return;
+
+  const partData = chat.participants[nick];
+  const mucJid = (typeof partData === 'object') ? partData?.mucJid : null;
+  const rawJid = mucJid || (nick.toLowerCase() + '@' + chat.jid.split('@')[1]);
+  const displayJid = bareJid(rawJid);
+  const displayName = nick;
+
+  // Store data globally for context menu callbacks
+  window._contextMenuData = { chat, nick, displayJid, displayName, acct };
+
+  const contextMenu = document.getElementById('context-menu');
+  contextMenu.innerHTML = `
+    <div style="padding: 6px 10px; font-size: 12px; color: var(--text3); border-bottom: 1px solid var(--border); margin-bottom: 4px;">${esc(displayName)}</div>
+    <div class="context-menu-item" onclick="openDirectMessageWithParticipant_Menu()">
+      💬 Send DM
+    </div>
+    <div class="context-menu-item" onclick="addParticipantToContacts_Menu()">
+      ➕ Add to Contacts
+    </div>
+  `;
+  
+  showContextMenu(window.currentContextEvent);
 }
+
+window.openDirectMessageWithParticipant_Menu = () => {
+  const data = window._contextMenuData;
+  if (!data) return;
+  const { nick, displayJid, acct, chat } = data;
+  
+  const key = chatKey(acct.id, displayJid);
+  ensureChat(key, { type: 'dm', name: nick, jid: displayJid, accountId: acct.id });
+  openChat(key);
+  hideContextMenu();
+};
+
+window.addParticipantToContacts_Menu = () => {
+  const data = window._contextMenuData;
+  if (!data) return;
+  const { displayJid, displayName, acct } = data;
+  
+  ipcRenderer.send('xmpp-add-contact', { accountId: acct.id, jid: displayJid, name: displayName });
+  if (!acct.roster) acct.roster = {};
+  acct.roster[displayJid] = { jid: displayJid, name: displayName, presence: 'offline', groups: [] };
+  saveRoster(acct.id, acct.roster);
+  addSystemMsg(null, acct.id, `📋 Subscription request sent to ${displayName}`);
+  renderLeftPanel();
+  hideContextMenu();
+};
+
+function showMessageSenderContextMenu(chat, msg) {
+  const acct = state.accounts.find(a => a.id === chat.accountId);
+  if (!acct) return;
+
+  // Extract nick from msg.from (e.g., "username@server/nickname" -> "nickname" or "nickname" for direct msgs)
+  const nick = msg.from.includes('/') ? msg.from.split('/')[1] : msg.from;
+  
+  // Try to get participant data for real JID
+  const partData = chat.participants?.[nick];
+  const mucJid = (typeof partData === 'object') ? partData?.mucJid : null;
+  const rawJid = mucJid || (nick.toLowerCase() + '@' + chat.jid.split('@')[1]);
+  const displayJid = bareJid(rawJid);
+  const displayName = nick;
+
+  // Store data globally for context menu callbacks
+  window._contextMenuData = { chat, nick, displayJid, displayName, acct };
+
+  const contextMenu = document.getElementById('context-menu');
+  contextMenu.innerHTML = `
+    <div style="padding: 6px 10px; font-size: 12px; color: var(--text3); border-bottom: 1px solid var(--border); margin-bottom: 4px;">${esc(displayName)}</div>
+    <div class="context-menu-item" onclick="openDirectMessageWithParticipant_Menu()">
+      💬 Send DM
+    </div>
+    <div class="context-menu-item" onclick="addParticipantToContacts_Menu()">
+      ➕ Add to Contacts
+    </div>
+  `;
+  
+  showContextMenu(window.currentContextEvent);
+}
+
+window.showMessageSenderContextMenu = showMessageSenderContextMenu;
+
+function showMessageContextMenu(msg) {
+  // Store message data for context menu callbacks
+  window._messageContextData = { msg };
+  
+  const contextMenu = document.getElementById('context-menu');
+  contextMenu.innerHTML = `
+    <div class="context-menu-item" onclick="quoteMessage_Menu()">
+      💬 Quote
+    </div>
+    <div class="context-menu-item" onclick="copyMessage_Menu()">
+      📋 Copy
+    </div>
+  `;
+  
+  showContextMenu(window.currentContextEvent);
+}
+
+window.showMessageContextMenu = showMessageContextMenu;
+
+window.quoteMessage_Menu = () => {
+  const data = window._messageContextData;
+  if (!data) return;
+  const { msg } = data;
+  const quotedText = msg.text.split('\n').map(line => '> ' + line).join('\n');
+  const fullQuote = `${msg.from} wrote:\n${quotedText}\n\n`;
+  msgInput.value = fullQuote;
+  msgInput.focus();
+  hideContextMenu();
+};
+
+window.copyMessage_Menu = () => {
+  const data = window._messageContextData;
+  if (!data) return;
+  const { msg } = data;
+  navigator.clipboard.writeText(msg.text).then(() => {
+    addSystemMsg(null, state.activeAccountId, '📋 Copied to clipboard');
+    hideContextMenu();
+  }).catch(() => {
+    addSystemMsg(null, state.activeAccountId, '❌ Failed to copy');
+    hideContextMenu();
+  });
+};
 
 function showContextMenu(e) {
   const contextMenu = document.getElementById('context-menu');
+  if (!contextMenu) {
+    console.error('Context menu element not found!');
+    return;
+  }
+  
   contextMenu.classList.remove('hidden');
+  contextMenu.style.zIndex = '10001';
 
-  let x = e.clientX;
-  let y = e.clientY;
+  let x = e.clientX || 0;
+  let y = e.clientY || 0;
 
-  // Adjust position if menu goes off-screen
   contextMenu.style.left = x + 'px';
   contextMenu.style.top = y + 'px';
 
-  // Check if menu is off-screen horizontally
-  const rect = contextMenu.getBoundingClientRect();
-  if (rect.right > window.innerWidth) {
-    x = window.innerWidth - rect.width - 10;
-    contextMenu.style.left = x + 'px';
-  }
-
-  // Check if menu is off-screen vertically
-  if (rect.bottom > window.innerHeight) {
-    y = window.innerHeight - rect.height - 10;
-    contextMenu.style.top = y + 'px';
-  }
+  // Adjust if off-screen
+  setTimeout(() => {
+    const rect = contextMenu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+      contextMenu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+    }
+    if (rect.bottom > window.innerHeight) {
+      contextMenu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+    }
+  }, 0);
 }
 
 function hideContextMenu() {
@@ -1370,6 +1510,14 @@ function hideContextMenu() {
 }
 
 window.hideContextMenu = hideContextMenu;
+
+// Close context menu when clicking elsewhere (but not on the menu itself)
+document.addEventListener('click', (e) => {
+  const contextMenu = document.getElementById('context-menu');
+  if (!contextMenu.classList.contains('hidden') && !contextMenu.contains(e.target)) {
+    hideContextMenu();
+  }
+});
 
 function addParticipantToContacts(accountId, jid, name, roomChat) {
   const acct = state.accounts.find(a => a.id === accountId);
@@ -1384,7 +1532,9 @@ function addParticipantToContacts(accountId, jid, name, roomChat) {
   // Get participant's presence from room if available
   let presence = 'offline';
   if (roomChat && roomChat.participants && roomChat.participants[name]) {
-    presence = roomChat.participants[name] !== 'offline' ? 'available' : 'offline';
+    const partData = roomChat.participants[name];
+    const presenceVal = (typeof partData === 'object') ? partData?.presence : partData;
+    presence = presenceVal !== 'offline' ? 'available' : 'offline';
   }
 
   acct.roster[jid] = { jid, name, presence, groups: [] };
@@ -1403,9 +1553,11 @@ function openDirectMessageWithParticipant(chat, nick) {
   const acct = state.accounts.find(a => a.id === chat.accountId);
   if (!acct) return;
 
-  // For participants in rooms, create a DM with their nick@room server
+  // Try to use actual JID from MUC if available, otherwise construct from nick
+  const partData = chat.participants[nick];
+  const mucJid = (typeof partData === 'object') ? partData?.mucJid : null;
   const roomServer = chat.jid.split('@')[1];
-  const participantJid = nick.toLowerCase() + '@' + roomServer;
+  const participantJid = mucJid || (nick.toLowerCase() + '@' + roomServer);
 
   // Create or find existing DM chat
   const key = chatKey(acct.id, participantJid);

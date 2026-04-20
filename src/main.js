@@ -302,11 +302,21 @@ function handleStanza(accountId, stanza) {
   }
 
   if (name === 'presence') {
+    // Extract MUC user jid if available (for non-anonymous rooms)
+    let mucJid = null;
+    const xEl = stanza.getChild('x', 'http://jabber.org/protocol/muc#user');
+    if (xEl) {
+      const itemEl = xEl.getChild('item');
+      if (itemEl && itemEl.attrs.jid) {
+        mucJid = itemEl.attrs.jid;
+      }
+    }
     send('xmpp-presence', {
       accountId,
       from: stanza.attrs.from,
       type: stanza.attrs.type || 'available',
-      show: stanza.getChildText('show') || 'available'
+      show: stanza.getChildText('show') || 'available',
+      mucJid: mucJid  // actual JID of participant (if available)
     });
     return;
   }
