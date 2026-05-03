@@ -333,6 +333,12 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
     if (settings.dmSoundEnabled !== false && acct?.presence !== 'dnd') {
       playNotificationSound({ beepCount: 2, baseFrequency: 600, frequencyIncrement: 0, beepDuration: 0.15, gapDuration: 0.08, volume: 0.25 });
     }
+
+    // Refresh the contact list to show the new DM
+    renderLeftPanel();
+
+    // Persist active DM metadata for unknown contacts
+    saveActiveDMs(accountId);
   }
 });
 
@@ -597,11 +603,28 @@ function renderContactList(acct) {
   }
 
   // Filter and sort all entries
-  const allEntries = Object.values(acct.roster || {}).filter(r =>
+  let allEntries = Object.values(acct.roster || {}).filter(r =>
     !r.jid.startsWith('directorbot@') && (
       !state.search || r.name.toLowerCase().includes(state.search) || r.jid.toLowerCase().includes(state.search)
     )
-  ).sort((a, b) => {
+  );
+
+  // Add active DMs (unknown contacts) to the list
+  const activeDMs = Object.entries(state.chats)
+    .filter(([key, chat]) => 
+      chat.accountId === acct.id && 
+      chat.type === 'dm' && 
+      !acct.roster?.[chat.jid] && // Not in roster
+      (!state.search || chat.name.toLowerCase().includes(state.search) || chat.jid.toLowerCase().includes(state.search))
+    )
+    .map(([key, chat]) => ({
+      jid: chat.jid,
+      name: chat.name,
+      presence: 'available', // Active DMs are treated as available for sorting
+      groups: chat.groups || [] // Use chat groups if available
+    }));
+
+  allEntries = allEntries.concat(activeDMs).sort((a, b) => {
     const ao = a.presence !== 'offline' ? 0 : 1, bo = b.presence !== 'offline' ? 0 : 1;
     return ao !== bo ? ao - bo : a.name.localeCompare(b.name);
   });
@@ -693,6 +716,15 @@ function renderContactList(acct) {
       renderContactList(acct);
     });
 
+    // Add context menu for user groups (not for Ungrouped)
+    if (groupName !== 'Ungrouped') {
+      headerEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showGroupContextMenu(groupName, acct, 'contact');
+      });
+    }
+
     contactListEl.appendChild(headerEl);
 
     // Render contacts in this group
@@ -736,10 +768,17 @@ function renderContactList(acct) {
           openChat(key);
         });
 
-        // Context menu for group management
+        // Context menu for group management or deletion
         el.addEventListener('contextmenu', (e) => {
           e.preventDefault();
-          showContactContextMenu(contact, acct);
+          const isRosterContact = acct.roster && acct.roster[contact.jid];
+          if (isRosterContact) {
+            showContactContextMenu(contact, acct);
+          } else {
+            // Unknown contact DM
+            const chat = state.chats[key];
+            showActiveDMContextMenu(chat, acct);
+          }
         });
 
         contactListEl.appendChild(el);
@@ -844,6 +883,15 @@ function renderRoomList(acct) {
       localStorage.setItem('roomGroups_' + acct.id, JSON.stringify(saved));
       renderRoomList(acct);
     });
+
+    // Add context menu for user room groups (not for Ungrouped)
+    if (groupName !== 'Ungrouped') {
+      headerEl.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        showRoomGroupContextMenu(groupName, acct);
+      });
+    }
 
     roomListEl.appendChild(headerEl);
 
@@ -1033,7 +1081,14 @@ function appendMessage(msg, chat) {
     const body   = last.querySelector('.msg-group-body');
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
-    bubble.textContent = parseEmoticons(msg.text);
+    
+    // Check if message contains HTML tags
+    if (/<[^>]/.test(msg.text)) {
+      bubble.innerHTML = sanitizeMessageHTML(parseEmoticons(msg.text));
+    } else {
+      bubble.textContent = parseEmoticons(msg.text);
+    }
+    
     applyEmoticons(bubble);
     linkifyUrls(bubble);
     body.insertBefore(bubble, body.querySelector('.msg-time'));
@@ -1068,7 +1123,14 @@ function appendMessage(msg, chat) {
 
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble';
-  bubble.textContent = parseEmoticons(msg.text);
+  
+  // Check if message contains HTML tags
+  if (/<[^>]/.test(msg.text)) {
+    bubble.innerHTML = sanitizeMessageHTML(parseEmoticons(msg.text));
+  } else {
+    bubble.textContent = parseEmoticons(msg.text);
+  }
+  
   applyEmoticons(bubble);
   linkifyUrls(bubble);
   bubble.style.cursor = 'context-menu';
@@ -1321,6 +1383,29 @@ function showRoomContextMenu(chat, acct) {
   `);
 }
 
+function showActiveDMContextMenu(chat, acct) {
+  if (!acct) return;
+
+  const allGroups = Object.keys(acct.groups || {});
+  const chatGroups = chat.groups || [];
+
+  let groupOptions = allGroups.map(groupName => {
+    const isInGroup = chatGroups.includes(groupName);
+    return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" onclick="moveDMToGroup('${esc(acct.id)}','${esc(chat.jid)}','${esc(groupName)}','${esc(chat.name)}')">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
+  }).join('');
+
+  showModal(`
+    <div class="modal-title">DM: ${esc(chat.name)}</div>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px">${esc(chat.jid)}</p>
+    ${groupOptions ? `<div style="display:grid;gap:8px;margin-bottom:16px;">${groupOptions}</div>` : ''}
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+      <button class="btn-secondary" onclick="showCreateDMGroupModal('${esc(acct.id)}','${esc(chat.jid)}','${esc(chat.name)}')">+ New Group</button>
+      <button class="btn-danger" onclick="submitDeleteActiveDM('${esc(chat.accountId)}','${esc(chat.jid)}','${esc(chat.name)}')">Delete</button>
+    </div>
+  `);
+}
+
 function showContactContextMenu(contact, acct) {
   if (!acct) return;
 
@@ -1345,6 +1430,207 @@ function showContactContextMenu(contact, acct) {
     </div>
   `);
 }
+
+function showGroupContextMenu(groupName, acct, groupType) {
+  if (!acct) return;
+
+  // Store group data globally for callbacks
+  window._groupContextData = { groupName, acct, groupType };
+
+  showModal(`
+    <div class="modal-title">Group: ${esc(groupName)}</div>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:16px">${groupType === 'contact' ? 'Contact group' : 'Room group'}</p>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+      <button class="btn-secondary" onclick="renameGroupModal('${esc(groupName)}','${esc(acct.id)}','${groupType}')">✏️ Rename</button>
+      <button class="btn-danger" onclick="deleteGroupConfirm('${esc(groupName)}','${esc(acct.id)}','${groupType}')">🗑️ Delete</button>
+    </div>
+  `);
+}
+
+function showRoomGroupContextMenu(groupName, acct) {
+  showGroupContextMenu(groupName, acct, 'room');
+}
+
+window.renameGroupModal = (groupName, accountId, groupType) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  showModal(`
+    <div class="modal-title">Rename Group</div>
+    <div id="modal-error"></div>
+    <div class="form-group">
+      <label class="form-label">New group name</label>
+      <input class="form-input" id="fi-rename-group" value="${esc(groupName)}" placeholder="Group name…" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+      <button class="btn-primary" onclick="submitRenameGroup('${esc(groupName)}','${esc(accountId)}','${groupType}')">Rename</button>
+    </div>
+  `);
+  document.getElementById('fi-rename-group').focus();
+  document.getElementById('fi-rename-group').select();
+};
+
+window.submitRenameGroup = (oldName, accountId, groupType) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  const input = document.getElementById('fi-rename-group');
+  const newName = input.value.trim();
+
+  if (!newName) {
+    document.getElementById('modal-error').innerHTML = '<div class="strip error">Group name is required.</div>';
+    return;
+  }
+
+  if (newName === oldName) {
+    hideModal();
+    return;
+  }
+
+  const groupsObj = groupType === 'room' ? acct.roomGroups : acct.groups;
+  
+  // Check if new name already exists
+  if (groupsObj[newName]) {
+    document.getElementById('modal-error').innerHTML = '<div class="strip error">Group name already exists.</div>';
+    return;
+  }
+
+  // Move metadata from old name to new name
+  const metadata = groupsObj[oldName];
+  groupsObj[newName] = { ...metadata, name: newName };
+  delete groupsObj[oldName];
+
+  // Update all items in this group
+  Object.values(state.chats).forEach(chat => {
+    if (chat.accountId !== accountId) return;
+    if (!chat.groups) chat.groups = [];
+    
+    const idx = chat.groups.indexOf(oldName);
+    if (idx >= 0) {
+      chat.groups[idx] = newName;
+    }
+  });
+
+  // Update roster contacts if this is a contact group
+  if (groupType !== 'room' && acct.roster) {
+    Object.values(acct.roster).forEach(contact => {
+      if (!contact.groups) contact.groups = [];
+      const idx = contact.groups.indexOf(oldName);
+      if (idx >= 0) {
+        contact.groups[idx] = newName;
+      }
+    });
+  }
+
+  // Save changes
+  if (groupType === 'room') {
+    saveRooms(accountId);
+    localStorage.setItem('roomGroups_' + accountId, JSON.stringify(acct.roomGroups));
+    renderRoomList(acct);
+  } else {
+    saveActiveDMs(accountId);
+    saveRoster(accountId, acct.roster);
+    localStorage.setItem('groups_' + accountId, JSON.stringify(acct.groups));
+    renderContactList(acct);
+  }
+
+  hideModal();
+  showModal(`
+    <div class="modal-title">✓ Renamed</div>
+    <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Group renamed from "${esc(oldName)}" to "${esc(newName)}".</p>
+    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+  `);
+};
+
+window.deleteGroupConfirm = (groupName, accountId, groupType) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  const groupsObj = groupType === 'room' ? acct.roomGroups : acct.groups;
+  let itemCount = 0;
+
+  // Count items in this group
+  Object.values(state.chats).forEach(chat => {
+    if (chat.accountId === accountId && chat.groups && chat.groups.includes(groupName)) {
+      itemCount++;
+    }
+  });
+
+  if (groupType !== 'room' && acct.roster) {
+    Object.values(acct.roster).forEach(contact => {
+      if (contact.groups && contact.groups.includes(groupName)) {
+        itemCount++;
+      }
+    });
+  }
+
+  const itemText = itemCount === 0 ? 'This group is empty.' : `This group has ${itemCount} item(s). They will be moved to Ungrouped.`;
+
+  showModal(`
+    <div class="modal-title">Delete Group?</div>
+    <p style="color:var(--text3);font-size:13px;margin-bottom:16px">
+      Are you sure you want to delete the group "${esc(groupName)}"?<br><br>
+      ${itemText}
+    </p>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+      <button class="btn-danger" onclick="submitDeleteGroup('${esc(groupName)}','${esc(accountId)}','${groupType}')">Delete</button>
+    </div>
+  `);
+};
+
+window.submitDeleteGroup = (groupName, accountId, groupType) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  const groupsObj = groupType === 'room' ? acct.roomGroups : acct.groups;
+
+  // Move all items in this group to ungrouped
+  Object.values(state.chats).forEach(chat => {
+    if (chat.accountId === accountId && chat.groups) {
+      const idx = chat.groups.indexOf(groupName);
+      if (idx >= 0) {
+        chat.groups.splice(idx, 1);
+      }
+    }
+  });
+
+  // Update roster contacts if this is a contact group
+  if (groupType !== 'room' && acct.roster) {
+    Object.values(acct.roster).forEach(contact => {
+      if (contact.groups) {
+        const idx = contact.groups.indexOf(groupName);
+        if (idx >= 0) {
+          contact.groups.splice(idx, 1);
+        }
+      }
+    });
+  }
+
+  // Delete group metadata
+  delete groupsObj[groupName];
+
+  // Save changes
+  if (groupType === 'room') {
+    saveRooms(accountId);
+    localStorage.setItem('roomGroups_' + accountId, JSON.stringify(acct.roomGroups));
+    renderRoomList(acct);
+  } else {
+    saveActiveDMs(accountId);
+    saveRoster(accountId, acct.roster);
+    localStorage.setItem('groups_' + accountId, JSON.stringify(acct.groups));
+    renderContactList(acct);
+  }
+
+  hideModal();
+  showModal(`
+    <div class="modal-title">✓ Deleted</div>
+    <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Group "${esc(groupName)}" has been deleted.</p>
+    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+  `);
+};
 
 
 
@@ -1621,6 +1907,33 @@ window.submitRemoveContact = (accountId, contactJid, contactName) => {
   `);
 };
 
+window.submitDeleteActiveDM = (accountId, chatJid, chatName) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  // Close any open chat
+  const key = chatKey(accountId, chatJid);
+  if (state.activeChatKey === key) {
+    state.activeChatKey = null;
+    showWelcome();
+  }
+  delete state.chats[key];
+
+  // Clear messages from localStorage
+  localStorage.removeItem('chat_messages_' + key);
+
+  // Update saved active DMs
+  saveActiveDMs(accountId);
+
+  // Re-render and show confirmation
+  renderLeftPanel();
+  showModal(`
+    <div class="modal-title">✓ Deleted</div>
+    <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Conversation with ${esc(chatName)} has been deleted.</p>
+    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+  `);
+};
+
 window.moveContactToGroup = (accountId, contactJid, groupName, contactName) => {
   const acct = state.accounts.find(a => a.id === accountId);
   if (!acct) return;
@@ -1714,6 +2027,88 @@ window.submitCreateGroup = (accountId, contactJid, contactName) => {
 
   // Re-render and close
   renderContactList(acct);
+  hideModal();
+};
+
+window.moveDMToGroup = (accountId, dmJid, groupName, dmName) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  const chat = Object.values(state.chats).find(c => c.jid === dmJid && c.accountId === accountId);
+  if (!chat) return;
+
+  // Initialize groups if needed
+  if (!chat.groups) chat.groups = [];
+
+  // Toggle group membership
+  const idx = chat.groups.indexOf(groupName);
+  if (idx >= 0) {
+    chat.groups.splice(idx, 1);
+  } else {
+    chat.groups.push(groupName);
+  }
+
+  // Save chats to persist group assignments
+  saveActiveDMs(accountId);
+
+  // Re-render
+  renderLeftPanel();
+  showModal(`
+    <div class="modal-title">✓ Updated</div>
+    <p style="color:var(--text3);font-size:13px;margin-bottom:16px">DM with ${esc(dmName)} group updated.</p>
+    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+  `);
+};
+
+window.showCreateDMGroupModal = (accountId, dmJid, dmName) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  showModal(`
+    <div class="modal-title">Create New Group</div>
+    <div id="modal-error"></div>
+    <div class="form-group">
+      <label class="form-label">Group name</label>
+      <input class="form-input" id="fi-dm-group-name" placeholder="e.g. Friends, Work…" />
+    </div>
+    <div class="modal-actions">
+      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
+      <button class="btn-primary" onclick="submitCreateDMGroup('${esc(accountId)}','${esc(dmJid)}','${esc(dmName)}')">Create & Add</button>
+    </div>
+  `);
+  document.getElementById('fi-dm-group-name').focus();
+};
+
+window.submitCreateDMGroup = (accountId, dmJid, dmName) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  const input = document.getElementById('fi-dm-group-name');
+  const groupName = input.value.trim();
+
+  if (!groupName) {
+    document.getElementById('modal-error').innerHTML = '<div class="strip error">Group name is required.</div>';
+    return;
+  }
+
+  // Create group metadata if it doesn't exist
+  if (!acct.groups[groupName]) {
+    acct.groups[groupName] = { name: groupName, collapsed: false };
+    // Save to localStorage
+    localStorage.setItem('groups_' + accountId, JSON.stringify(acct.groups));
+  }
+
+  // Add DM to group
+  const chat = Object.values(state.chats).find(c => c.jid === dmJid && c.accountId === accountId);
+  if (chat) {
+    if (!chat.groups) chat.groups = [];
+    if (!chat.groups.includes(groupName)) {
+      chat.groups.push(groupName);
+    }
+    // Save chats to persist group assignments
+    saveActiveDMs(accountId);
+  }
+
+  // Re-render and close
+  renderLeftPanel();
   hideModal();
 };
 
@@ -2073,6 +2468,49 @@ function loadChatMessages(key) {
   }
 }
 
+function saveActiveDMs(accountId) {
+  // Save metadata of DM chats that aren't in the roster (for persistence across restarts)
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (!acct) return;
+
+  const activeDMs = Object.entries(state.chats)
+    .filter(([key, chat]) => 
+      chat.accountId === accountId && 
+      chat.type === 'dm' && 
+      !acct.roster?.[chat.jid] // Not in roster
+    )
+    .map(([key, chat]) => ({
+      jid: chat.jid,
+      name: chat.name,
+      type: 'dm',
+      accountId: chat.accountId,
+      groups: chat.groups || []  // Save group assignments
+    }));
+
+  if (activeDMs.length > 0) {
+    localStorage.setItem('activeDMs_' + accountId, JSON.stringify(activeDMs));
+  }
+}
+
+function loadActiveDMs(accountId) {
+  // Load DM chats that aren't in the roster from a previous session
+  try {
+    const saved = JSON.parse(localStorage.getItem('activeDMs_' + accountId) || '[]');
+    saved.forEach(dmData => {
+      const key = chatKey(accountId, dmData.jid);
+      ensureChat(key, { 
+        type: 'dm', 
+        name: dmData.name, 
+        jid: dmData.jid, 
+        accountId,
+        groups: dmData.groups || []  // Restore group assignments
+      });
+    });
+  } catch (err) {
+    console.error('Failed to load active DMs:', err);
+  }
+}
+
 async function loadAndConnect() {
   const saved = await ipcRenderer.invoke('load-accounts');
   if (!saved?.length) return;
@@ -2089,6 +2527,9 @@ async function loadAndConnect() {
     const directorBotJid = 'directorbot@' + data.server;
     const key = chatKey(acct.id, directorBotJid);
     ensureChat(key, { type: 'dm', name: 'Directorbot', jid: directorBotJid, accountId: acct.id });
+
+    // Load active DM chats from previous session
+    loadActiveDMs(acct.id);
   });
   state.activeAccountId = state.accounts[0].id;
   renderAccountBar();
@@ -2126,6 +2567,84 @@ function saveAppSettings(settings) {
 function setTheme(themeName) {
   document.documentElement.setAttribute('data-theme', themeName);
   saveAppSettings({ theme: themeName });
+}
+
+// ─────────────────────────────────────────────
+//  Message Sanitization & Rendering
+//  ─────────────────────────────────────────────
+function sanitizeMessageHTML(html) {
+  // Create a temporary container
+  const temp = document.createElement('div');
+  temp.innerHTML = html;
+
+  // Allowed tags and their allowed attributes
+  const allowed = {
+    'b': [],
+    'strong': [],
+    'em': [],
+    'i': [],
+    'u': [],
+    'br': [],
+    'span': ['style', 'class'],
+    'div': ['style', 'class']
+  };
+
+  function sanitizeNode(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.cloneNode(true);
+    }
+
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const tag = node.tagName.toLowerCase();
+      
+      if (!allowed.hasOwnProperty(tag)) {
+        // Not allowed - replace with text content
+        const textNode = document.createTextNode(node.textContent);
+        return textNode;
+      }
+
+      // Create sanitized element
+      const safeEl = document.createElement(tag);
+
+      // Copy allowed attributes
+      if (allowed[tag].includes('style')) {
+        // Only allow color and basic text styles
+        const style = node.getAttribute('style') || '';
+        const allowedStyles = ['color', 'background-color', 'text-decoration', 'font-weight', 'font-style'];
+        const styleParts = style.split(';').map(s => s.trim()).filter(s => {
+          const prop = s.split(':')[0].trim().toLowerCase();
+          return allowedStyles.includes(prop);
+        });
+        if (styleParts.length > 0) {
+          safeEl.setAttribute('style', styleParts.join('; '));
+        }
+      }
+
+      if (allowed[tag].includes('class')) {
+        const cls = node.getAttribute('class');
+        if (cls) safeEl.setAttribute('class', cls);
+      }
+
+      // Recursively sanitize children
+      for (let i = 0; i < node.childNodes.length; i++) {
+        const sanitized = sanitizeNode(node.childNodes[i]);
+        if (sanitized) safeEl.appendChild(sanitized);
+      }
+
+      return safeEl;
+    }
+
+    return null;
+  }
+
+  // Sanitize all child nodes
+  const sanitized = document.createElement('div');
+  for (let i = 0; i < temp.childNodes.length; i++) {
+    const node = sanitizeNode(temp.childNodes[i]);
+    if (node) sanitized.appendChild(node);
+  }
+
+  return sanitized.innerHTML;
 }
 
 // ─────────────────────────────────────────────
