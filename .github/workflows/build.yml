@@ -22,7 +22,7 @@ jobs:
         run: npm ci --omit=optional
 
       - name: Build Linux
-        run: npm run build:linux
+        run: npm run build:linux -- --publish never
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@main
@@ -46,7 +46,7 @@ jobs:
         run: npm ci
 
       - name: Build macOS
-        run: npm run build:mac
+        run: npm run build:mac -- --publish never
 
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@main
@@ -70,7 +70,7 @@ jobs:
         run: npm ci
 
       - name: Build Windows
-        run: npm run build:win
+        run: npm run build:win -- --publish never
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@main
