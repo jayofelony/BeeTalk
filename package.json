@@ -1,8 +1,8 @@
 {
   "name": "beetalk",
   "productName": "BeeTalk",
-  "version": "1.0.6",
-  "description": "A modern XMPP chat client",
+  "version": "1.0.7",
+  "description": "A modern XMPP chat client for Goonswarm Federation",
   "author": "JayJ Plaude <beetalk@gmail.com>",
   "main": "src/main.js",
   "scripts": {

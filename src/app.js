@@ -2285,10 +2285,12 @@ function showAccountSettingsModal() {
       <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
         <input type="checkbox" id="fi-alarm-enabled" ${alarmEnabled ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
         <label for="fi-alarm-enabled" style="cursor: pointer; margin: 0;">Play alarm for Directorbot messages</label>
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: auto;" onclick="playAlarmSound()">Test</button>
       </div>
       <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
         <input type="checkbox" id="fi-dm-sound-enabled" ${dmSoundEnabled ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
         <label for="fi-dm-sound-enabled" style="cursor: pointer; margin: 0;">Play sound for direct messages</label>
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: auto;" onclick="playDMSound()">Test</button>
       </div>
     </div>
 
