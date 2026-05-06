@@ -9,9 +9,9 @@
     "start": "electron .",
     "icons": "node scripts/create-icons.js",
     "build": "npm run icons && electron-builder -mwl",
-    "build:win": "npm run icons && electron-builder --win",
-    "build:mac": "npm run icons && electron-builder --mac",
-    "build:linux": "electron-builder --linux",
+    "build:win": "npm run icons && electron-builder --win --publish never",
+    "build:mac": "npm run icons && electron-builder --mac --publish never",
+    "build:linux": "electron-builder --linux --publish never",
     "pack": "electron-builder --dir"
   },
   "build": {
