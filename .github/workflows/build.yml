@@ -106,9 +106,10 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            linux-builds/*
-            macos-builds/*
-            windows-builds/*
+            linux-builds/*.AppImage
+            linux-builds/*.deb
+            macos-builds/*.dmg
+            windows-builds/*.exe
           draft: false
           prerelease: false
         env:
