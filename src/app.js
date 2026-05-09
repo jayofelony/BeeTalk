@@ -114,8 +114,19 @@ function esc(s) {
 }
 function chatKey(accountId, jid) { return accountId + '::' + jid; }
 function bareJid(jid) { return jid ? jid.split('/')[0] : ''; }
-function showModal(html) { modalContent.innerHTML = html; modalOverlay.classList.remove('hidden'); }
-function hideModal()     { modalOverlay.classList.add('hidden'); modalContent.innerHTML = ''; }
+// Safe modal: expects pre-escaped HTML content from caller
+function showModal(html) {
+  if (typeof html !== 'string') {
+    console.error('Modal HTML must be a string');
+    return;
+  }
+  modalContent.innerHTML = html;
+  modalOverlay.classList.remove('hidden');
+}
+function hideModal() {
+  modalOverlay.classList.add('hidden');
+  modalContent.innerHTML = '';
+}
 window.hideModal = hideModal;
 
 // ─────────────────────────────────────────────

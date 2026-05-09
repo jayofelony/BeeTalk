@@ -42,7 +42,11 @@ async function getPassword(accountId) {
         console.log(`Migrating password for account ${accountId} from ${OLD_KEYTAR_SERVICE} to ${KEYTAR_SERVICE}...`);
         await savePassword(accountId, password);
         // Clean up old service
-        try { await keytar.deletePassword(OLD_KEYTAR_SERVICE, accountId); } catch {}
+        try {
+          await keytar.deletePassword(OLD_KEYTAR_SERVICE, accountId);
+        } catch (err) {
+          console.warn(`Failed to clean up old keytar entry for ${accountId}:`, err.message);
+        }
       }
     }
 
@@ -142,6 +146,23 @@ function createTray() {
 
 function send(channel, ...args) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
+}
+
+// ─────────────────────────────────────────────
+//  Validation Utilities
+// ─────────────────────────────────────────────
+
+function isValidJid(jid) {
+  return typeof jid === 'string' && /^[^\s@]+@[^\s@]+(?:\/[^\s]+)?$/.test(jid);
+}
+
+function isValidMessageType(type) {
+  const validTypes = ['chat', 'groupchat', 'headline', 'normal'];
+  return validTypes.includes(type);
+}
+
+function isDebugMode() {
+  return process.env.DEBUG === 'true' || process.env.DEBUG_BEETALK === 'true';
 }
 
 // ─────────────────────────────────────────────
@@ -344,12 +365,40 @@ ipcMain.on('xmpp-disconnect', (e, { id })  => destroyConnection(id));
 ipcMain.on('xmpp-send-message', (e, { accountId, to, body, type }) => {
   const c = connections[accountId];
   if (!c) return;
-  c._xmpp.send(xml('message', { to, type: type || 'chat' }, xml('body', {}, body))).catch(() => {});
+
+  // Validate parameters
+  if (!isValidJid(to)) {
+    console.error(`Invalid JID in xmpp-send-message: ${to}`);
+    return;
+  }
+  if (typeof body !== 'string' || body.trim().length === 0) {
+    console.error('Empty message body in xmpp-send-message');
+    return;
+  }
+  const msgType = type || 'chat';
+  if (!isValidMessageType(msgType)) {
+    console.error(`Invalid message type in xmpp-send-message: ${msgType}`);
+    return;
+  }
+
+  c._xmpp.send(xml('message', { to, type: msgType }, xml('body', {}, body))).catch(() => {});
 });
 
 ipcMain.on('xmpp-send-presence', (e, { accountId, show, status }) => {
   const c = connections[accountId];
   if (!c) return;
+
+  // Validate parameters
+  const validShows = ['available', 'away', 'dnd', 'xa', 'chat'];
+  if (show && !validShows.includes(show)) {
+    console.error(`Invalid presence show value: ${show}`);
+    return;
+  }
+  if (status && typeof status !== 'string') {
+    console.error('Status must be a string');
+    return;
+  }
+
   const kids = [];
   if (show && show !== 'available') kids.push(xml('show', {}, show));
   if (status) kids.push(xml('status', {}, status));
@@ -360,6 +409,13 @@ ipcMain.on('xmpp-send-presence', (e, { accountId, show, status }) => {
 ipcMain.on('xmpp-add-contact', (e, { accountId, jid, name }) => {
   const c = connections[accountId];
   if (!c) return;
+
+  // Validate parameters
+  if (!isValidJid(jid)) {
+    console.error(`Invalid JID in xmpp-add-contact: ${jid}`);
+    return;
+  }
+
   // Send subscription request
   c._xmpp.send(xml('presence', { to: jid, type: 'subscribe' })).catch(() => {});
 });
@@ -367,6 +423,17 @@ ipcMain.on('xmpp-add-contact', (e, { accountId, jid, name }) => {
 ipcMain.on('xmpp-update-contact-groups', (e, { accountId, jid, name, groups }) => {
   const c = connections[accountId];
   if (!c) return;
+
+  // Validate parameters
+  if (!isValidJid(jid)) {
+    console.error(`Invalid JID in xmpp-update-contact-groups: ${jid}`);
+    return;
+  }
+  if (!Array.isArray(groups)) {
+    console.error('Groups must be an array');
+    return;
+  }
+
   // Send roster update IQ with new groups
   const groupElements = groups.map(groupName => xml('group', {}, groupName));
   const item = xml('item', { jid, name: name || jid }, ...groupElements);
@@ -378,6 +445,13 @@ ipcMain.on('xmpp-update-contact-groups', (e, { accountId, jid, name, groups }) =
 ipcMain.on('xmpp-remove-contact', (e, { accountId, jid }) => {
   const c = connections[accountId];
   if (!c) return;
+
+  // Validate parameters
+  if (!isValidJid(jid)) {
+    console.error(`Invalid JID in xmpp-remove-contact: ${jid}`);
+    return;
+  }
+
   // Remove from roster with subscription='remove'
   const item = xml('item', { jid, subscription: 'remove' });
   const query = xml('query', { xmlns: 'jabber:iq:roster' }, item);
@@ -392,6 +466,17 @@ ipcMain.on('xmpp-remove-contact', (e, { accountId, jid }) => {
 ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick }) => {
   const c = connections[accountId];
   if (!c) return;
+
+  // Validate parameters
+  if (!isValidJid(roomJid)) {
+    console.error(`Invalid room JID in xmpp-join-room: ${roomJid}`);
+    return;
+  }
+  if (typeof nick !== 'string' || nick.trim().length === 0) {
+    console.error('Invalid nick in xmpp-join-room');
+    return;
+  }
+
   // Join with history request (last 50 messages, max 1 hour old, max 100KB)
   c._xmpp.send(
     xml('presence', { to: `${roomJid}/${nick}` },
@@ -404,6 +489,17 @@ ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick }) => {
 ipcMain.on('xmpp-leave-room', (e, { accountId, roomJid, nick }) => {
   const c = connections[accountId];
   if (!c) return;
+
+  // Validate parameters
+  if (!isValidJid(roomJid)) {
+    console.error(`Invalid room JID in xmpp-leave-room: ${roomJid}`);
+    return;
+  }
+  if (typeof nick !== 'string' || nick.trim().length === 0) {
+    console.error('Invalid nick in xmpp-leave-room');
+    return;
+  }
+
   c._xmpp.send(xml('presence', { to: `${roomJid}/${nick}`, type: 'unavailable' })).catch(() => {});
 });
 
@@ -562,21 +658,21 @@ ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, cou
 
   const xmpp = conn._xmpp;
   const messages = [];
-  let complete = false;
+  let resolved = false;
 
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      stanzaHandler();
-      resolve(messages);
-    }, 5000);
+    function cleanup() {
+      if (resolved) return;
+      resolved = true;
+      xmpp.removeListener('stanza', listener);
+      clearTimeout(timeoutHandle);
+    }
 
     function stanzaHandler(stanza) {
-      resetTimeout();
       if (!stanza) return;
-
       const name = stanza.name;
 
-      // Handle MAM result
+      // Handle MAM result messages
       if (name === 'message') {
         const result = stanza.getChild('result', 'urn:xmpp:mam:2');
         if (result) {
@@ -590,33 +686,20 @@ ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, cou
               const from = msg.attrs.from;
               const ts = delay && delay.attrs.stamp ? new Date(delay.attrs.stamp).getTime() : Date.now();
 
-              messages.push({
-                from,
-                text: body,
-                ts,
-                me: false
-              });
+              messages.push({ from, text: body, ts, me: false });
             }
           }
         }
       }
 
-      // Handle IQ result (RSM - Result Set Management)
+      // Handle IQ result (completion marker)
       if (name === 'iq' && stanza.attrs.type === 'result') {
         const fin = stanza.getChild('fin', 'urn:xmpp:mam:2');
-        if (fin) {
-          const set = fin.getChild('set', 'http://jabber.org/protocol/rsm');
-          if (set) {
-            const isComplete = fin.attrs.complete === 'true';
-            if (isComplete) complete = true;
-          }
-          stanzaHandler();
+        if (fin && fin.attrs.complete === 'true') {
+          cleanup();
+          resolve(messages.reverse());
         }
       }
-    }
-
-    function resetTimeout() {
-      clearTimeout(timeout);
     }
 
     const listener = (stanza) => stanzaHandler(stanza);
@@ -643,27 +726,16 @@ ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, cou
       )
     );
 
+    const timeoutHandle = setTimeout(() => {
+      cleanup();
+      resolve(messages.reverse());
+    }, 5000);
+
     xmpp.send(mamQuery).catch(err => {
       console.error('MAM query error:', err);
-      xmpp.off('stanza', listener);
-      resolve(messages);
-    });
-
-    // Cleanup after timeout or completion
-    const originalTimeout = timeout;
-    const cleanupTimer = setInterval(() => {
-      if (complete) {
-        clearInterval(cleanupTimer);
-        xmpp.off('stanza', listener);
-        resolve(messages.reverse()); // Reverse to get chronological order
-      }
-    }, 100);
-
-    setTimeout(() => {
-      clearInterval(cleanupTimer);
-      xmpp.off('stanza', listener);
+      cleanup();
       resolve(messages.reverse());
-    }, 6000);
+    });
   });
 });
 
@@ -672,16 +744,12 @@ ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, cou
 // ─────────────────────────────────────────────
 async function discoverRoomsOnServer(xmpp, server, timeout = 8000) {
   const rooms = [];
-  let foundResponse = false;
+  let cleaned = false;
 
   return new Promise((resolve) => {
-    const timeoutHandle = setTimeout(() => {
-      cleanup();
-      console.log(`Room discovery timeout on ${server}`);
-      resolve([]);
-    }, timeout);
-
     function cleanup() {
+      if (cleaned) return;
+      cleaned = true;
       clearTimeout(timeoutHandle);
       xmpp.removeListener('stanza', listener);
     }
@@ -691,18 +759,15 @@ async function discoverRoomsOnServer(xmpp, server, timeout = 8000) {
       if (stanza.attrs.type !== 'result') return;
       if (stanza.attrs.id !== queryId) return;
 
-      foundResponse = true;
-      clearTimeout(timeoutHandle);
-
       const query = stanza.getChild('query', 'http://jabber.org/protocol/disco#items');
       if (query) {
         const items = query.getChildren('item');
-        console.log(`Found ${items.length} rooms on ${server}`);
+        if (isDebugMode()) console.log(`Found ${items.length} rooms on ${server}`);
 
         items.forEach(item => {
           const jid = item.attrs.jid;
           const name = item.attrs.name || jid.split('@')[0];
-          if (jid && name) {
+          if (jid && name && isValidJid(jid)) {
             rooms.push({ jid, name, description: '' });
           }
         });
@@ -719,7 +784,13 @@ async function discoverRoomsOnServer(xmpp, server, timeout = 8000) {
       xml('query', { xmlns: 'http://jabber.org/protocol/disco#items' })
     );
 
-    console.log(`Querying ${server} for available rooms (id: ${queryId})...`);
+    if (isDebugMode()) console.log(`Querying ${server} for available rooms (id: ${queryId})...`);
+
+    const timeoutHandle = setTimeout(() => {
+      cleanup();
+      if (isDebugMode()) console.log(`Room discovery timeout on ${server}`);
+      resolve([]);
+    }, timeout);
 
     xmpp.on('stanza', listener);
 
@@ -734,30 +805,36 @@ async function discoverRoomsOnServer(xmpp, server, timeout = 8000) {
 ipcMain.handle('discover-rooms', async (e, { accountId }) => {
   const conn = connections[accountId];
   if (!conn) {
-    console.log('No connection found for account', accountId);
+    if (isDebugMode()) console.log('No connection found for account', accountId);
     return [];
   }
 
   const xmpp = conn._xmpp;
+  const account = conn.account;
+  const domain = account.server || 'goonfleet.com';
 
-  // Try multiple MUC server variants
+  // Try multiple MUC server variants (derive from account domain, with fallbacks)
   const mucServers = [
+    `conference.${domain}`,
+    `muc.${domain}`,
+    `rooms.${domain}`,
+    // Fallback to GSF servers
     'conference.goonfleet.com',
     'muc.goonfleet.com',
     'rooms.goonfleet.com'
   ];
 
   for (const server of mucServers) {
-    console.log(`Attempting room discovery on ${server}...`);
+    if (isDebugMode()) console.log(`Attempting room discovery on ${server}...`);
     const rooms = await discoverRoomsOnServer(xmpp, server, 8000);
 
     if (rooms.length > 0) {
-      console.log(`Successfully discovered ${rooms.length} rooms on ${server}`);
+      if (isDebugMode()) console.log(`Successfully discovered ${rooms.length} rooms on ${server}`);
       return rooms.sort((a, b) => a.name.localeCompare(b.name));
     }
   }
 
-  console.log('Room discovery failed on all servers');
+  if (isDebugMode()) console.log('Room discovery failed on all servers');
   return [];
 });
 
@@ -783,14 +860,14 @@ function compareVersions(current, latest) {
 
 async function performUpdateCheck() {
   try {
-    console.log('Starting update check...');
+    if (isDebugMode()) console.log('Starting update check...');
     const https = require('https');
     const currentVersion = require('../package.json').version;
-    console.log('Current version:', currentVersion);
+    if (isDebugMode()) console.log('Current version:', currentVersion);
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
-        console.log('Update check timed out');
+        if (isDebugMode()) console.log('Update check timed out');
         resolve({ status: 'error', error: 'Update check timed out' });
       }, 8000);
 
@@ -801,33 +878,31 @@ async function performUpdateCheck() {
         headers: { 'User-Agent': 'BeeTalk' }
       };
 
-      console.log('Fetching tags from GitHub...');
+      if (isDebugMode()) console.log('Fetching tags from GitHub...');
       https.request(options, (res) => {
-        console.log('Got response, status:', res.statusCode);
+        if (isDebugMode()) console.log('Got response, status:', res.statusCode);
         let data = '';
         res.on('data', chunk => data += chunk);
         res.on('end', () => {
           clearTimeout(timeout);
-          console.log('Raw response data:', data.slice(0, 200));
           try {
             const tags = JSON.parse(data);
-            console.log('Parsed tags:', tags.length);
+            if (isDebugMode()) console.log('Parsed tags:', tags.length);
 
             if (!Array.isArray(tags) || tags.length === 0) {
-              console.log('No tags found');
+              if (isDebugMode()) console.log('No tags found');
               resolve({ status: 'error', error: 'No tags found in repository' });
               return;
             }
 
             const latestTag = tags[0];
-            console.log('Latest tag:', latestTag.name);
+            if (isDebugMode()) console.log('Latest tag:', latestTag.name);
             const latestVersion = latestTag.name.replace(/^v/, '');
             const comparison = compareVersions(currentVersion, latestVersion);
-            console.log('Version comparison:', currentVersion, 'vs', latestVersion, '=', comparison);
+            if (isDebugMode()) console.log('Version comparison:', currentVersion, 'vs', latestVersion, '=', comparison);
 
             if (comparison > 0) {
-              console.log('Update available, fetching release info...');
-              // Get the release/pre-release info for this tag
+              if (isDebugMode()) console.log('Update available, fetching release info...');
               const releaseOptions = {
                 hostname: 'api.github.com',
                 path: `/repos/jayofelony/BeeTalk/releases/tags/${latestTag.name}`,
@@ -836,13 +911,13 @@ async function performUpdateCheck() {
               };
 
               https.request(releaseOptions, (releaseRes) => {
-                console.log('Release response status:', releaseRes.statusCode);
+                if (isDebugMode()) console.log('Release response status:', releaseRes.statusCode);
                 let releaseData = '';
                 releaseRes.on('data', chunk => releaseData += chunk);
                 releaseRes.on('end', () => {
                   try {
                     const release = JSON.parse(releaseData);
-                    console.log('Parsed release');
+                    if (isDebugMode()) console.log('Parsed release');
                     resolve({
                       status: 'update-available',
                       version: latestVersion,
@@ -861,7 +936,6 @@ async function performUpdateCheck() {
                 });
               }).on('error', (err) => {
                 console.error('Release request error:', err.message);
-                // If release endpoint fails, just report update available with release page URL
                 resolve({
                   status: 'update-available',
                   version: latestVersion,
@@ -870,7 +944,7 @@ async function performUpdateCheck() {
                 });
               }).end();
             } else {
-              console.log('Already up to date');
+              if (isDebugMode()) console.log('Already up to date');
               resolve({ status: 'up-to-date', version: currentVersion });
             }
           } catch (err) {
