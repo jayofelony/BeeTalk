@@ -392,6 +392,12 @@ function ensureChat(key, defaults) {
 function pushMessage(key, msg) {
   const chat = state.chats[key];
   if (!chat) return;
+  
+  // Ensure message has a valid timestamp
+  if (!msg.ts || msg.ts === 0) {
+    msg.ts = Date.now();
+  }
+  
   chat.messages.push(msg);
   
   // For rooms, enforce max message limit in memory (keep only recent messages)
@@ -2345,6 +2351,45 @@ window.submitAccountSettings = () => {
   }
 };
 
+function showChatInfoModal() {
+  const chat = state.chats[state.activeChatKey];
+  if (!chat) return;
+
+  const type = chat.type === 'room' ? 'Group Chat' : 'Direct Message';
+  const participants = chat.participants ? Object.keys(chat.participants).length : 0;
+
+  showModal(`
+    <div class="modal-title">Chat Info</div>
+    <div style="padding: 12px 0;">
+      <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+        <div class="avatar" style="font-size: 24px; width: 60px; height: 60px; display: flex; align-items: center; justify-content: center;">${esc(initials(chat.name))}</div>
+        <div>
+          <div style="font-weight: 500; font-size: 14px;">${esc(chat.name)}</div>
+          <div style="font-size: 12px; color: var(--text2);">${type}</div>
+        </div>
+      </div>
+      <div style="border-top: 1px solid var(--border); padding-top: 12px;">
+        <div style="font-size: 12px; color: var(--text2); margin-bottom: 4px; text-transform: uppercase;">Details</div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 13px;">
+          <div>
+            <div style="color: var(--text2); margin-bottom: 2px;">JID</div>
+            <div style="word-break: break-all; font-family: monospace; font-size: 11px;">${esc(chat.jid || '—')}</div>
+          </div>
+          ${chat.type === 'room' ? `
+            <div>
+              <div style="color: var(--text2); margin-bottom: 2px;">Participants</div>
+              <div>${participants}</div>
+            </div>
+          ` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-primary" onclick="hideModal()">Close</button>
+    </div>
+  `);
+}
+
 window.checkForUpdate = async () => {
   const btn = document.getElementById('update-check-btn');
   const spinner = document.getElementById('update-spinner');
@@ -3206,24 +3251,25 @@ window.showBrowseRoomsModal = showBrowseRoomsModal;
 // ─────────────────────────────────────────────
 //  Event listeners
 // ─────────────────────────────────────────────
-$('btn-minimize').addEventListener('click',  () => ipcRenderer.send('window-minimize'));
-$('btn-maximize').addEventListener('click',  () => ipcRenderer.send('window-maximize'));
-$('btn-close').addEventListener('click',     () => ipcRenderer.send('window-close'));
-$('btn-add-account').addEventListener('click',  showAddAccountModal);
-$('btn-welcome-add').addEventListener('click',  showAddAccountModal);
-$('btn-browse-rooms').addEventListener('click',  showBrowseRoomsModal);
-$('btn-settings').addEventListener('click',     showAccountSettingsModal);
+$('btn-minimize').addEventListener('click', () => ipcRenderer.send('window-minimize'));
+$('btn-maximize').addEventListener('click', () => ipcRenderer.send('window-maximize'));
+$('btn-close').addEventListener('click', () => ipcRenderer.send('window-close'));
+$('btn-add-account').addEventListener('click', showAddAccountModal);
+$('btn-welcome-add').addEventListener('click', showAddAccountModal);
+$('btn-browse-rooms').addEventListener('click', showBrowseRoomsModal);
+$('btn-settings').addEventListener('click', showAccountSettingsModal);
 btnReconnect.addEventListener('click', () => {
   const acct = getActiveAccount();
   if (acct) {
     ipcRenderer.send('xmpp-connect', acct);
   }
 });
-$('btn-emoticon').addEventListener('click',     showEmoticonPicker);
+$('btn-emoticon').addEventListener('click', showEmoticonPicker);
 $('btn-send').addEventListener('click', sendMessage);
+$('btn-chat-info').addEventListener('click', showChatInfoModal);
 
 msgInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
-msgInput.addEventListener('input',   () => { msgInput.style.height = 'auto'; msgInput.style.height = Math.min(msgInput.scrollHeight, 130) + 'px'; });
+msgInput.addEventListener('input', () => { msgInput.style.height = 'auto'; msgInput.style.height = Math.min(msgInput.scrollHeight, 130) + 'px'; });
 
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
