@@ -4,7 +4,10 @@
       "WebFetch(domain:github.com)",
       "Bash(npm install *)",
       "PowerShell(Test-Path *)",
-      "WebFetch(domain:riftforeve.online)"
+      "WebFetch(domain:riftforeve.online)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(node --check src/app.js)",
+      "WebFetch(domain:developers.eveonline.com)"
     ]
   }
 }
