@@ -333,11 +333,20 @@ function eveGetTheme() {
   return document.documentElement.getAttribute('data-theme') || 'dark';
 }
 
+// RIFT-compatible security status colors (11-tier scale)
 function eveSecColor(sec) {
-  if (sec >= 1.0) return '#2FEFEF'; if (sec >= 0.9) return '#48F0C0'; if (sec >= 0.8) return '#00EF47';
-  if (sec >= 0.7) return '#00F000'; if (sec >= 0.6) return '#8FEF2F'; if (sec >= 0.5) return '#EFEF00';
-  if (sec >= 0.4) return '#D77700'; if (sec >= 0.3) return '#F06000'; if (sec >= 0.2) return '#F04800';
-  if (sec >= 0.1) return '#D73000'; return '#F00000';
+  const roundedSec = Math.round(sec * 10) / 10;  // Round to nearest 0.1
+  if (roundedSec >= 1.0) return '#2E74DF';   // Deep blue (1.0+)
+  if (roundedSec >= 0.9) return '#379CF6';   // Bright blue (0.9-0.99)
+  if (roundedSec >= 0.8) return '#4ACFF3';   // Cyan (0.8-0.89)
+  if (roundedSec >= 0.7) return '#5CDCA6';   // Teal (0.7-0.79)
+  if (roundedSec >= 0.6) return '#70E552';   // Green (0.6-0.69)
+  if (roundedSec >= 0.5) return '#EEFF83';   // Yellow-green (0.5-0.59)
+  if (roundedSec >= 0.4) return '#DC6C08';   // Orange (0.4-0.49)
+  if (roundedSec >= 0.3) return '#CE4611';   // Dark orange (0.3-0.39)
+  if (roundedSec >= 0.2) return '#BC1113';   // Dark red (0.2-0.29)
+  if (roundedSec >= 0.1) return '#6D231A';   // Deep maroon (0.1-0.19)
+  return '#8F3068';                           // Purple (0.0-0.09, null sec)
 }
 
 function eveMapToCanvas(x, z) {
