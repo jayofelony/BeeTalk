@@ -1091,6 +1091,8 @@ async function preloadEveUniverse() {
             if (fromRegionId === region._key || toRegionId === region._key) {
               jumpBridges.push([fromId, toId]);
             }
+          } else if (region._key === 10000006) {
+            console.log(`Jump bridge mismatch: ${fromName}(${fromId}) -> ${toName}(${toId})`);
           }
         }
       }
@@ -1119,6 +1121,10 @@ async function preloadEveUniverse() {
 
       if (region._key === 10000006) {
         console.log(`Wicked Creek: ${systems.length} systems, ${connections.length} stargate connections, ${jumpBridges.length} jump bridges`);
+        const jb5e = jumpBridges.filter(([a, b]) => a === 30000554 || b === 30000554);
+        if (jb5e.length > 0) {
+          console.log(`Found 5E-CMA jump bridges:`, jb5e);
+        }
       }
     }
 
@@ -1131,16 +1137,21 @@ async function preloadEveUniverse() {
 
 ipcMain.handle('eve-get-systems', async (e, { systemIds }) => {
   try {
+    console.log('eve-get-systems: looking up', systemIds, 'type:', typeof systemIds[0]);
     const systems = [];
-    for (const sysId of systemIds) {
+    const numericIds = systemIds.map(id => Number(id));
+
+    for (const sysId of numericIds) {
       for (const region of Object.values(eveUniverseCache.regions)) {
-        const sys = region.systems.find(s => s.id === sysId);
+        const sys = region.systems.find(s => Number(s.id) === sysId);
         if (sys) {
           systems.push(sys);
+          console.log(`Found system ${sysId}: ${sys.name}`);
           break;
         }
       }
     }
+    console.log('eve-get-systems: returning', systems.length, 'systems');
     return systems;
   } catch (err) {
     console.error('eve-get-systems error:', err);
