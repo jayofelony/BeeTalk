@@ -115,13 +115,25 @@ The app can link EVE Online characters to XMPP accounts via OAuth2. When a chara
 - `renderEveMapPanel()` — Updates character selector dropdown and location label
 - `updateEveMapPanelVisibility()` — Shows/hides EVE map panel based on linked characters
 
+**Character Location Polling** (`fetchEveLocations()` in `src/main.js`):
+- Polls every 5 seconds for character location updates
+- **Primary source: EVE cache** — If EVE client is running, reads local cache files instantly
+  - Cache path: `C:\Users\{username}\AppData\Local\CCP\EVE\c_ccp_eve_tq_tranquility\cache\`
+  - Uses `pickler` npm package to parse cPickle format cache files
+  - Instant updates when character jumps (no API latency)
+- **Fallback: ESI API** — If EVE cache unavailable, queries ESI API
+  - Uses OAuth tokens stored in `electron-store`
+  - Provides character location when EVE client is closed
+- Updates renderer via `eve-location-update` IPC event with `{ systemId, systemName, regionName }`
+
 **EVE Data Flow**:
-1. Main process sends `eve-location-update` when character location changes
-2. Renderer receives event, updates `eveLocationState[characterId]`
-3. Sets `eveTrackedCharacterId` to the most recently updated character
-4. Calls `eveMapLoadRegion(systemId)` to fetch region data from ESI
-5. Canvas auto-centers on that system with blue pulsing indicator
-6. All other linked characters shown with orange glow on the map
+1. Main process polls EVE cache or ESI every 5 seconds
+2. Sends `eve-location-update` when character location changes
+3. Renderer receives event, updates `eveLocationState[characterId]`
+4. Sets `eveTrackedCharacterId` to the most recently updated character
+5. Calls `eveMapLoadRegion(systemId)` to fetch region data from ESI
+6. Canvas auto-centers on that system with blue pulsing indicator
+7. All other linked characters shown with orange glow on the map
 
 **ESI Integration** (`eve-load-region-map` handler):
 - Fetches system data from https://esi.evetech.net/latest
@@ -201,5 +213,7 @@ Light/dark theme is controlled by a CSS class on `<body>`. The theme choice is p
 - MUC (Multi-User Chat) room join flow requires sending presence after joining; this is handled in main.js
 - Message Archive Management (MAM) queries for history happen on room join; they're paginated to avoid overload
 - **EVE OAuth**: Requires `EVE_CLIENT_ID` set in `src/main.js` (get from https://developers.eveonline.com/applications). Callback URL must be registered as `http://localhost:7777/callback`
-- **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). No local database required but adds startup delay for first region load
+- **EVE Cache Reading**: Uses `pickler` npm package to parse cPickle format from EVE client cache. Provides instant location updates when EVE is running. Gracefully falls back to ESI API if cache unavailable (when EVE is closed or cache not found).
+- **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). System coordinates and connections pulled from ESI. Map data cached client-side after initial load.
 - **EVE Token Storage**: Uses `electron-store` not keytar (keytar has size limits for large tokens). Tokens include expiry; refresh flow not yet implemented (tokens assumed valid for session duration)
+- **EVE Character Location**: Polls every 5 seconds. Tries local cache first (instant if EVE running), falls back to ESI API. Supports both Tranquility (main server) and Singularity (test server) cache directories.
