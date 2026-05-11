@@ -232,6 +232,7 @@ ipcRenderer.on('xmpp-status', (e, { id, status, jid, error }) => {
     addSystemMsg(null, id, '⚠ Disconnected — reconnecting…');
   }
   acct._wasOnline = (status === 'online');
+  renderAccountBar();
   if (state.activeAccountId === id) renderLeftPanel();
 });
 
@@ -889,7 +890,20 @@ function saveRoster(accountId, roster) {
 //  Render
 // ─────────────────────────────────────────────
 function renderAccountBar() {
-  // Account bar functionality removed - reserved for future use
+  accountListEl.innerHTML = '';
+  const acct = getActiveAccount();
+  if (!acct) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'acct-btn ' + acct.color;
+  btn.title = acct.displayName || acct.username;
+  btn.textContent = initials(acct.username);
+  const pip = document.createElement('span');
+  pip.className = 'acct-status-pip ' + (acct.status === 'online' ? 'dot-green' : acct.status === 'connecting' ? 'dot-amber' : 'dot-gray');
+  btn.appendChild(pip);
+  btn.addEventListener('click', () => showAccountContextMenu(acct));
+  accountListEl.appendChild(btn);
+  accountListEl.style.display = 'flex';
 }
 
 function renderLeftPanel() {
@@ -3001,6 +3015,7 @@ async function loadAndConnect() {
     loadActiveDMs(acct.id);
   });
   state.activeAccountId = state.accounts[0].id;
+  renderAccountBar();
   renderLeftPanel();
   renderEveMapPanel();
   initEveMapCanvas();
