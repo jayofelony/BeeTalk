@@ -168,6 +168,41 @@ html, body {
 }
 #btn-add-account:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ── Neocom bar ── */
+#neocom-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.neocom-btn {
+  width: 40px;
+  height: 40px;
+  border-radius: 6px;
+  border: 1px solid var(--border-mid);
+  background: var(--bg2);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+  padding: 0;
+  overflow: hidden;
+}
+.neocom-btn img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  pointer-events: none;
+}
+.neocom-btn:hover {
+  background: var(--bg3);
+  border-color: var(--accent-dim);
+}
+
 /* ── Left panel ── */
 #left-panel {
   width: 250px;

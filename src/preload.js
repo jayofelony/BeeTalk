@@ -42,6 +42,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   eveGetCharacters: (data) => ipcRenderer.invoke('eve-get-characters', data),
   eveGetSystems: (data) => ipcRenderer.invoke('eve-get-systems', data),
   eveLoadRegionMap: (data) => ipcRenderer.invoke('eve-load-region-map', data),
+  eveGetRegionConnections: (data) => ipcRenderer.invoke('eve-get-region-connections', data),
+  eveGetWallet: (data) => ipcRenderer.invoke('eve-get-wallet', data),
+  eveSetAutopilot: (data) => ipcRenderer.invoke('eve-set-autopilot', data),
+  eveGetAutopilotWaypoint: (data) => ipcRenderer.invoke('eve-get-autopilot-waypoint', data),
   onEveCharacterLinked: (callback) => ipcRenderer.on('eve-character-linked', callback),
   onEveLocationUpdate: (callback) => ipcRenderer.on('eve-location-update', callback),
 });

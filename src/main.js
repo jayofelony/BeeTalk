@@ -31,6 +31,47 @@ const reconnectTimers = {}; // accountId -> timer handle
 app.setName('BeeTalk');
 
 // ─────────────────────────────────────────────
+//  EVE Token Refresh
+// ─────────────────────────────────────────────
+async function refreshEveToken(characterId, tokens) {
+  try {
+    const params = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refreshToken,
+      client_id: EVE_CLIENT_ID,
+    });
+
+    const resp = await fetch(EVE_TOKEN_URL, {
+      method: 'POST',
+      body: params,
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
+    });
+
+    if (!resp.ok) {
+      console.error(`Token refresh failed for ${characterId}: ${resp.status}`);
+      return null;
+    }
+
+    const newTokens = await resp.json();
+    const updatedTokens = {
+      accessToken: newTokens.access_token,
+      refreshToken: newTokens.refresh_token || tokens.refreshToken,
+      expiresAt: Date.now() + (newTokens.expires_in * 1000)
+    };
+
+    const eveTokens = store.get('eveTokens', {});
+    eveTokens[characterId] = updatedTokens;
+    store.set('eveTokens', eveTokens);
+
+    console.log(`Token refreshed for character ${characterId}`);
+    return updatedTokens;
+  } catch (err) {
+    console.error(`Token refresh error for ${characterId}:`, err.message);
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────
 //  EVE Character Location Polling
 // ─────────────────────────────────────────────
 let eveLocationPollTimer = null;
@@ -38,7 +79,9 @@ async function fetchEveLocations() {
   const eveTokens = store.get('eveTokens', {});
   const accounts = store.get('accounts', []);
 
-  for (const [characterId, tokens] of Object.entries(eveTokens)) {
+  if (Object.keys(eveTokens).length === 0) return;
+
+  for (const [characterId, initialTokens] of Object.entries(eveTokens)) {
     const account = accounts.find(a => a.eveCharacters?.some(c => c.characterId === Number(characterId)));
     if (!account) continue;
 
@@ -46,15 +89,25 @@ async function fetchEveLocations() {
     if (!character) continue;
 
     try {
-      const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
+      let tokens = initialTokens;
+      let locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
         headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
       });
+
+      if (locResp.status === 401) {
+        const refreshedTokens = await refreshEveToken(characterId, tokens);
+        if (!refreshedTokens) continue;
+        tokens = refreshedTokens;
+        locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
+          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
+        });
+      }
+
       if (!locResp.ok) continue;
 
       const locData = await locResp.json();
       const systemId = locData.solar_system_id;
 
-      // Get system details
       const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
       if (!systemResp.ok) continue;
 
@@ -73,12 +126,12 @@ async function fetchEveLocations() {
           }
         }
       } catch (err) {
-        // ignore region lookup errors
+        // Fail silently
       }
 
       send('eve-location-update', { accountId: account.id, characterId: Number(characterId), characterName: character.characterName, systemId, systemName, regionName });
     } catch (err) {
-      // ignore polling errors
+      // Fail silently
     }
   }
 }
@@ -437,6 +490,10 @@ ipcMain.on('xmpp-connect', (e, account) => {
   });
 });
 ipcMain.on('xmpp-disconnect', (e, { id })  => destroyConnection(id));
+
+ipcMain.on('fetch-eve-locations', async (e) => {
+  await fetchEveLocations();
+});
 
 ipcMain.on('xmpp-send-message', (e, { accountId, to, body, type }) => {
   const c = connections[accountId];
@@ -922,20 +979,16 @@ ipcMain.handle('eve-link-character', async (e, { accountId }) => {
 
     // Fetch character location and send to renderer
     try {
-      console.log(`Fetching location for character ${characterId} with token...`);
       const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
         headers: { 'Authorization': `Bearer ${tokens.access_token}` }
       });
-      console.log(`Location response status: ${locResp.status}`);
       if (locResp.ok) {
         const locData = await locResp.json();
-        console.log(`Character location: system ${locData.solar_system_id}`);
         const systemId = locData.solar_system_id;
         const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
         if (systemResp.ok) {
           const systemData = await systemResp.json();
           const systemName = systemData.name;
-          console.log(`System: ${systemName}, sending eve-location-update`);
           // Try to find region name
           let regionName = '';
           try {
@@ -949,18 +1002,13 @@ ipcMain.handle('eve-link-character', async (e, { accountId }) => {
               }
             }
           } catch (err) {
-            console.warn('Failed to fetch region name:', err.message);
+            // Fail silently
           }
-          console.log(`Sending eve-location-update event with region: ${regionName}`);
           send('eve-location-update', { accountId, characterId, characterName, systemId, systemName, regionName });
-        } else {
-          console.error(`Failed to fetch system ${systemId}:`, systemResp.status);
         }
-      } else {
-        console.error('Failed to fetch character location:', locResp.status, locResp.statusText);
       }
     } catch (err) {
-      console.error('Failed to fetch character location:', err);
+      // Fail silently
     }
   }
 
@@ -1000,7 +1048,6 @@ function parseJsonl(content) {
 
 async function preloadEveUniverse() {
   if (eveUniverseLoaded) return;
-  console.log('Preloading EVE universe data from Static Data Export...');
 
   try {
     const fs = require('fs');
@@ -1017,10 +1064,8 @@ async function preloadEveUniverse() {
     try {
       jumpBridgesData = JSON.parse(fs.readFileSync(path.join(assetsDir, 'jump-bridges.json'), 'utf8'));
     } catch (err) {
-      console.warn('No jump bridges file found');
+      // No jump bridges file found
     }
-
-    console.log(`Loaded ${systemsData.length} systems, ${regionsData.length} regions, ${stargatesData.length} stargates`);
 
     // Build system index
     const systemIndex = {};
@@ -1043,7 +1088,7 @@ async function preloadEveUniverse() {
       const regionSystems = systemsData.filter(s => s.regionID === region._key);
       const regionSystemIds = new Set(regionSystems.map(s => s._key));
 
-      // Build connections (stargates within this region)
+      // Build connections (stargates within this region AND to neighboring regions)
       const connections = [];
       const connectionSet = new Set();
 
@@ -1051,12 +1096,11 @@ async function preloadEveUniverse() {
         const gates = stargatesBySystem[sys._key] || [];
         for (const gate of gates) {
           const destSysId = gate.destination.solarSystemID;
-          if (regionSystemIds.has(destSysId)) {
-            const pair = [Math.min(sys._key, destSysId), Math.max(sys._key, destSysId)].join(',');
-            if (!connectionSet.has(pair)) {
-              connectionSet.add(pair);
-              connections.push([sys._key, destSysId]);
-            }
+          // Include both intra-region and inter-region connections
+          const pair = [Math.min(sys._key, destSysId), Math.max(sys._key, destSysId)].join(',');
+          if (!connectionSet.has(pair)) {
+            connectionSet.add(pair);
+            connections.push([sys._key, destSysId]);
           }
         }
       }
@@ -1092,8 +1136,6 @@ async function preloadEveUniverse() {
             if (fromRegionId === region._key || toRegionId === region._key) {
               jumpBridges.push([fromId, toId]);
             }
-          } else if (region._key === 10000006) {
-            console.log(`Jump bridge mismatch: ${fromName}(${fromId}) -> ${toName}(${toId})`);
           }
         }
       }
@@ -1119,77 +1161,45 @@ async function preloadEveUniverse() {
         connections,
         jumpBridges
       };
-
-      if (region._key === 10000006) {
-        console.log(`Wicked Creek: ${systems.length} systems, ${connections.length} stargate connections, ${jumpBridges.length} jump bridges`);
-        const jb5e = jumpBridges.filter(([a, b]) => a === 30000554 || b === 30000554);
-        console.log(`5E-CMA jump bridges: ${jb5e.length}`, jb5e);
-
-        // Check if 5E-CMA is in the systems
-        const sys5e = systems.find(s => s.id === 30000554);
-        console.log(`5E-CMA in systems:`, sys5e ? sys5e.name : 'NOT FOUND');
-
-        // Check allSystemNameToId
-        console.log(`allSystemNameToId['5E-CMA']:`, allSystemNameToId['5E-CMA']);
-      }
     }
 
     eveUniverseLoaded = true;
-    console.log('EVE universe preload complete');
   } catch (err) {
-    console.error('Failed to preload EVE universe:', err);
+    // Fail silently
   }
 }
 
 ipcMain.handle('eve-get-systems', async (e, { systemIds }) => {
-  console.log('eve-get-systems handler called with', systemIds);
   try {
-    if (!eveUniverseLoaded) {
-      console.error('eve-get-systems: universe not loaded yet!');
-      return [];
-    }
+    if (!eveUniverseLoaded) return [];
 
-    console.log('eve-get-systems: looking up', systemIds);
     const systems = [];
     const numericIds = systemIds.map(id => Number(id));
 
     for (const sysId of numericIds) {
       for (const [regionId, region] of Object.entries(eveUniverseCache.regions)) {
-        if (!region.systems) {
-          console.warn(`Region ${regionId} has no systems array`);
-          continue;
-        }
+        if (!region.systems) continue;
         const sys = region.systems.find(s => {
           const sid = Number(s.id);
           return sid === sysId;
         });
         if (sys) {
-          systems.push({ ...sys, regionName: region.regionName });
-          console.log(`Found ${sysId} in region ${regionId}: ${sys.name}`);
+          systems.push({ ...sys, regionName: region.regionName, region_id: Number(regionId) });
           break;
         }
       }
     }
-    console.log('eve-get-systems: returning', systems.length, 'systems');
-    console.log('eve-get-systems: result:', systems);
     return systems;
   } catch (err) {
-    console.error('eve-get-systems error:', err);
-    console.error('Stack:', err.stack);
     return [];
   }
 });
 
 ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
   try {
-    console.log(`eve-load-region-map: looking up cached data for system ${systemId}`);
-
     // Find the system in cache
     const system = eveUniverseCache.systems[systemId];
-    if (!system) {
-      console.error(`System ${systemId} not found in cache`);
-      return null;
-    }
+    if (!system) return null;
 
     // Find the region that contains this system
     let targetRegion = null;
@@ -1200,10 +1210,7 @@ ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
       }
     }
 
-    if (!targetRegion) {
-      console.error(`Region for system ${systemId} not found in cache`);
-      return null;
-    }
+    if (!targetRegion) return null;
 
     return {
       regionName: targetRegion.regionName,
@@ -1214,8 +1221,162 @@ ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
       jumpBridges: targetRegion.jumpBridges || []
     };
   } catch (err) {
-    console.error('eve-load-region-map error:', err);
     return null;
+  }
+});
+
+ipcMain.handle('eve-get-all-regions', async (e) => {
+  try {
+    const regions = Object.values(eveUniverseCache.regions || {});
+    return regions;
+  } catch (err) {
+    return [];
+  }
+});
+
+ipcMain.handle('eve-get-region-connections', async (e, { regionIds }) => {
+  try {
+    if (!eveUniverseLoaded) return [];
+
+    const connections = [];
+    regionIds.forEach(regionId => {
+      const region = eveUniverseCache.regions[regionId];
+      if (region && region.connections) {
+        connections.push(...region.connections);
+      }
+    });
+    return connections;
+  } catch (err) {
+    return [];
+  }
+});
+
+ipcMain.handle('eve-set-autopilot', async (e, { characterId, destinationId, clearWaypoints = true }) => {
+  try {
+    const eveTokens = store.get('eveTokens', {});
+    const tokens = eveTokens[characterId];
+    if (!tokens) return { success: false, error: 'No tokens found' };
+
+    let resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/?destination_id=${destinationId}&clear_other_waypoints=${clearWaypoints}&add_to_beginning=false`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${tokens.accessToken}`
+      }
+    });
+
+    if (resp.status === 401) {
+      const refreshedTokens = await refreshEveToken(characterId, tokens);
+      if (!refreshedTokens) return { success: false, error: 'Token refresh failed' };
+
+      resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/?destination_id=${destinationId}&clear_other_waypoints=${clearWaypoints}&add_to_beginning=false`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${refreshedTokens.accessToken}`
+        }
+      });
+    }
+
+    if (resp.ok) {
+      return { success: true };
+    } else {
+      const errorText = await resp.text();
+      return { success: false, error: `HTTP ${resp.status}: ${errorText}` };
+    }
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+ipcMain.handle('eve-get-autopilot-waypoint', async (e, { characterId }) => {
+  try {
+    const eveTokens = store.get('eveTokens', {});
+    const tokens = eveTokens[characterId];
+    if (!tokens) return { waypoint: null, error: 'no tokens' };
+
+    let resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/`, {
+      headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
+    });
+
+    if (resp.status === 401) {
+      const refreshedTokens = await refreshEveToken(characterId, tokens);
+      if (!refreshedTokens) return { waypoint: null, error: 'token refresh failed' };
+
+      resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/`, {
+        headers: { 'Authorization': `Bearer ${refreshedTokens.accessToken}` }
+      });
+    }
+
+    if (resp.status === 204) {
+      // 204 No Content means no waypoint is set
+      return { waypoint: null };
+    }
+
+    if (resp.ok) {
+      const data = await resp.json();
+      return { waypoint: data.destination_id || null };
+    }
+    return { waypoint: null, error: `HTTP ${resp.status}` };
+  } catch (err) {
+    return { waypoint: null, error: err.message };
+  }
+});
+
+ipcMain.handle('eve-get-wallet', async (e, { characterIds }) => {
+  try {
+    const eveTokens = store.get('eveTokens', {});
+    const accounts = store.get('accounts', []);
+    const balances = {};
+    const transactions = {};
+
+    for (const charId of characterIds) {
+      const tokens = eveTokens[charId];
+      if (!tokens) continue;
+
+      try {
+        // Fetch wallet balance
+        const balResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/`, {
+          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
+        });
+
+        if (balResp.status === 401) {
+          const refreshedTokens = await refreshEveToken(charId, tokens);
+          if (refreshedTokens) {
+            const retryResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/`, {
+              headers: { 'Authorization': `Bearer ${refreshedTokens.accessToken}` }
+            });
+            if (retryResp.ok) {
+              balances[charId] = await retryResp.json();
+            }
+          }
+        } else if (balResp.ok) {
+          balances[charId] = await balResp.json();
+        }
+
+        // Fetch wallet journal (all transaction types - last 50)
+        let journalResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/journal/?limit=50`, {
+          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
+        });
+
+        if (journalResp.status === 401) {
+          const refreshedTokens = await refreshEveToken(charId, tokens);
+          if (refreshedTokens) {
+            journalResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/journal/?limit=50`, {
+              headers: { 'Authorization': `Bearer ${refreshedTokens.accessToken}` }
+            });
+          }
+        }
+
+        if (journalResp.ok) {
+          transactions[charId] = await journalResp.json();
+        }
+      } catch (err) {
+        // Continue to next character
+      }
+    }
+
+    return { balances, transactions };
+  } catch (err) {
+    return { balances: {}, transactions: {} };
   }
 });
 
