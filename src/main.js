@@ -1061,34 +1061,36 @@ async function preloadEveUniverse() {
         }
       }
 
-      // Build jump bridges for this region (only intra-region bridges)
+      // Build jump bridges for this region (including cross-region connections)
       const jumpBridges = [];
       if (region._key === 10000006) {  // Wicked Creek
         const regionJumpBridges = jumpBridgesData.wickedCreek || [];
-        const systemNameToId = {};
         const regionSystemIds = new Set(regionSystems.map(s => s._key));
 
-        // Build index for this region
-        regionSystems.forEach(s => {
-          const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
-          systemNameToId[sysName] = s._key;
-        });
-
-        // Build index for ALL systems to find destinations
+        // Build index for ALL systems globally
         const allSystemNameToId = {};
-        const allSystemIdToRegion = {};
+        const allSystemsMap = {};
         systemsData.forEach(s => {
           const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
           allSystemNameToId[sysName] = s._key;
-          allSystemIdToRegion[s._key] = s.regionID;
+          allSystemsMap[s._key] = s;
         });
 
         for (const [fromName, toName] of regionJumpBridges) {
           const fromId = allSystemNameToId[fromName];
           const toId = allSystemNameToId[toName];
-          // Only include if BOTH endpoints are in this region
-          if (fromId && toId && regionSystemIds.has(fromId) && regionSystemIds.has(toId)) {
-            jumpBridges.push([fromId, toId]);
+
+          if (fromId && toId) {
+            const fromRegionId = allSystemsMap[fromId]?.regionID;
+            const toRegionId = allSystemsMap[toId]?.regionID;
+
+            // Include if:
+            // 1. Both systems are in this region (intra-region)
+            // 2. From system is in this region (origin point)
+            // 3. To system is in this region (destination point)
+            if (fromRegionId === region._key || toRegionId === region._key) {
+              jumpBridges.push([fromId, toId]);
+            }
           }
         }
       }
@@ -1126,6 +1128,25 @@ async function preloadEveUniverse() {
     console.error('Failed to preload EVE universe:', err);
   }
 }
+
+ipcMain.handle('eve-get-systems', async (e, { systemIds }) => {
+  try {
+    const systems = [];
+    for (const sysId of systemIds) {
+      for (const region of Object.values(eveUniverseCache.regions)) {
+        const sys = region.systems.find(s => s.id === sysId);
+        if (sys) {
+          systems.push(sys);
+          break;
+        }
+      }
+    }
+    return systems;
+  } catch (err) {
+    console.error('eve-get-systems error:', err);
+    return [];
+  }
+});
 
 ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
   try {

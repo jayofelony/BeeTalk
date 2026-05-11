@@ -538,10 +538,27 @@ async function eveMapLoadRegion(systemId) {
   eveMap.systemIndex = {};
   data.systems.forEach(s => { eveMap.systemIndex[s.id] = s; });
 
-  // Note: Cross-region jump bridges won't render (endpoints not in loaded systems)
-  // This is expected - only intra-region jump bridges will display
-  const intraRegionBridges = (data.jumpBridges || []).filter(([a, b]) => eveMap.systemIndex[a] && eveMap.systemIndex[b]).length;
-  console.log('EVE map data loaded:', { systems: data.systems.length, connections: data.connections.length, jumpBridges: intraRegionBridges, regionName: data.regionName });
+  // For cross-region jump bridges, we need to fetch the destination system data
+  // Request additional system data for jump bridge endpoints from the main process
+  if (data.jumpBridges && data.jumpBridges.length > 0) {
+    const missingSystemIds = [];
+    data.jumpBridges.forEach(([a, b]) => {
+      if (!eveMap.systemIndex[a]) missingSystemIds.push(a);
+      if (!eveMap.systemIndex[b]) missingSystemIds.push(b);
+    });
+
+    if (missingSystemIds.length > 0) {
+      console.log('Fetching cross-region jump bridge endpoint data:', missingSystemIds.length);
+      ipcRenderer.invoke('eve-get-systems', { systemIds: missingSystemIds }).then(systems => {
+        systems.forEach(s => {
+          eveMap.systemIndex[s.id] = s;
+        });
+        console.log('Cross-region systems added to index:', systems.length);
+      });
+    }
+  }
+
+  console.log('EVE map data loaded:', { systems: data.systems.length, connections: data.connections.length, jumpBridges: data.jumpBridges?.length || 0, regionName: data.regionName });
 
   // Only fit to canvas on first load, not on updates
   if (isFirstLoad && eveMap.canvas) {
