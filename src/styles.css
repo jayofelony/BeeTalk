@@ -117,7 +117,7 @@ html, body {
   flex-shrink: 0;
 }
 #account-list {
-  display: flex;
+  display: none;
   flex-direction: column;
   gap: 8px;
   align-items: center;
@@ -151,6 +151,7 @@ html, body {
   border: 2px solid var(--bg0);
 }
 #btn-add-account {
+  display: none;
   width: 36px;
   height: 36px;
   border-radius: 10px;
@@ -159,7 +160,6 @@ html, body {
   color: var(--text3);
   font-size: 22px;
   cursor: pointer;
-  display: flex;
   align-items: center;
   justify-content: center;
   line-height: 1;
@@ -524,6 +524,7 @@ html, body {
 #welcome-inner h2 { font-size: 20px; font-weight: 500; color: var(--text1); margin-bottom: 8px; }
 #welcome-inner p { font-size: 13px; color: var(--text3); line-height: 1.6; margin-bottom: 20px; }
 #btn-welcome-add {
+  display: none;
   padding: 9px 20px;
   background: var(--accent);
   color: #fff;

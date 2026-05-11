@@ -1063,13 +1063,14 @@ async function preloadEveUniverse() {
 
       // Build jump bridges for this region (including cross-region connections)
       const jumpBridges = [];
+      let allSystemNameToId = {};
+      let allSystemsMap = {};
+
       if (region._key === 10000006) {  // Wicked Creek
         const regionJumpBridges = jumpBridgesData.wickedCreek || [];
         const regionSystemIds = new Set(regionSystems.map(s => s._key));
 
         // Build index for ALL systems globally
-        const allSystemNameToId = {};
-        const allSystemsMap = {};
         systemsData.forEach(s => {
           const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
           allSystemNameToId[sysName] = s._key;
@@ -1122,9 +1123,14 @@ async function preloadEveUniverse() {
       if (region._key === 10000006) {
         console.log(`Wicked Creek: ${systems.length} systems, ${connections.length} stargate connections, ${jumpBridges.length} jump bridges`);
         const jb5e = jumpBridges.filter(([a, b]) => a === 30000554 || b === 30000554);
-        if (jb5e.length > 0) {
-          console.log(`Found 5E-CMA jump bridges:`, jb5e);
-        }
+        console.log(`5E-CMA jump bridges: ${jb5e.length}`, jb5e);
+
+        // Check if 5E-CMA is in the systems
+        const sys5e = systems.find(s => s.id === 30000554);
+        console.log(`5E-CMA in systems:`, sys5e ? sys5e.name : 'NOT FOUND');
+
+        // Check allSystemNameToId
+        console.log(`allSystemNameToId['5E-CMA']:`, allSystemNameToId['5E-CMA']);
       }
     }
 
@@ -1136,25 +1142,40 @@ async function preloadEveUniverse() {
 }
 
 ipcMain.handle('eve-get-systems', async (e, { systemIds }) => {
+  console.log('eve-get-systems handler called with', systemIds);
   try {
-    console.log('eve-get-systems: looking up', systemIds, 'type:', typeof systemIds[0]);
+    if (!eveUniverseLoaded) {
+      console.error('eve-get-systems: universe not loaded yet!');
+      return [];
+    }
+
+    console.log('eve-get-systems: looking up', systemIds);
     const systems = [];
     const numericIds = systemIds.map(id => Number(id));
 
     for (const sysId of numericIds) {
-      for (const region of Object.values(eveUniverseCache.regions)) {
-        const sys = region.systems.find(s => Number(s.id) === sysId);
+      for (const [regionId, region] of Object.entries(eveUniverseCache.regions)) {
+        if (!region.systems) {
+          console.warn(`Region ${regionId} has no systems array`);
+          continue;
+        }
+        const sys = region.systems.find(s => {
+          const sid = Number(s.id);
+          return sid === sysId;
+        });
         if (sys) {
-          systems.push(sys);
-          console.log(`Found system ${sysId}: ${sys.name}`);
+          systems.push({ ...sys, regionName: region.regionName });
+          console.log(`Found ${sysId} in region ${regionId}: ${sys.name}`);
           break;
         }
       }
     }
     console.log('eve-get-systems: returning', systems.length, 'systems');
+    console.log('eve-get-systems: result:', systems);
     return systems;
   } catch (err) {
     console.error('eve-get-systems error:', err);
+    console.error('Stack:', err.stack);
     return [];
   }
 });

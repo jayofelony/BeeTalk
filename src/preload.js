@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   eveLinkCharacter: (data) => ipcRenderer.invoke('eve-link-character', data),
   eveUnlinkCharacter: (data) => ipcRenderer.invoke('eve-unlink-character', data),
   eveGetCharacters: (data) => ipcRenderer.invoke('eve-get-characters', data),
+  eveGetSystems: (data) => ipcRenderer.invoke('eve-get-systems', data),
   eveLoadRegionMap: (data) => ipcRenderer.invoke('eve-load-region-map', data),
   onEveCharacterLinked: (callback) => ipcRenderer.on('eve-character-linked', callback),
   onEveLocationUpdate: (callback) => ipcRenderer.on('eve-location-update', callback),

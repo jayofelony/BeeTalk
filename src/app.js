@@ -232,7 +232,6 @@ ipcRenderer.on('xmpp-status', (e, { id, status, jid, error }) => {
     addSystemMsg(null, id, '⚠ Disconnected — reconnecting…');
   }
   acct._wasOnline = (status === 'online');
-  renderAccountBar();
   if (state.activeAccountId === id) renderLeftPanel();
 });
 
@@ -398,7 +397,8 @@ function eveMapDraw() {
     ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
   });
 
-  // Jump bridges
+  // Jump bridges and cross-region endpoints
+  const crossRegionEndpoints = new Map(); // systemId -> { system, regionName }
   if (eveMap.showJumpBridges && data.jumpBridges) {
     ctx.strokeStyle = isDark ? 'rgba(255, 100, 100, 0.4)' : 'rgba(200, 50, 50, 0.3)';
     ctx.lineWidth = 0.8;
@@ -408,6 +408,16 @@ function eveMapDraw() {
       if (!sa || !sb) return;
       const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.y);
       ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
+
+      // Track cross-region endpoints (systems not in current region)
+      const inCurrentRegion = data.systems.some(sys => sys.id === a);
+      if (!inCurrentRegion && sa && sa.regionName) {
+        crossRegionEndpoints.set(a, { system: sa, regionName: sa.regionName });
+      }
+      const inCurrentRegionB = data.systems.some(sys => sys.id === b);
+      if (!inCurrentRegionB && sb && sb.regionName) {
+        crossRegionEndpoints.set(b, { system: sb, regionName: sb.regionName });
+      }
     });
     ctx.setLineDash([]);
   }
@@ -442,6 +452,33 @@ function eveMapDraw() {
 
     ctx.fillStyle = isFocus ? '#5b8ef0' : hasCharacters ? '#c89632' : color;
     ctx.beginPath(); ctx.arc(cx, cy, isFocus ? dotR * 2.5 : hasCharacters ? dotR * 1.8 : dotR, 0, Math.PI * 2); ctx.fill();
+  });
+
+  // Cross-region jump bridge endpoints
+  const crossRegionLabels = [];
+  crossRegionEndpoints.forEach(({ system: sys, regionName }) => {
+    const { cx, cy } = eveMapToCanvas(sys.x, sys.y);
+    if (cx < -30 || cx > w + 30 || cy < -30 || cy > h + 30) return;
+    const color = eveSecColor(sys.security);
+    const dimColor = isDark ? 'rgba(100,100,100,0.4)' : 'rgba(150,150,150,0.3)';
+
+    ctx.fillStyle = dimColor;
+    ctx.beginPath(); ctx.arc(cx, cy, dotR * 0.8, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(cx, cy, dotR * 0.5, 0, Math.PI * 2); ctx.fill();
+
+    crossRegionLabels.push({ cx, cy, name: sys.name, regionName });
+  });
+
+  // Cross-region endpoint labels
+  ctx.font = '10px -apple-system, Segoe UI, sans-serif';
+  ctx.fillStyle = isDark ? 'rgba(200,200,200,0.5)' : 'rgba(80,80,80,0.5)';
+  crossRegionLabels.forEach(({ cx, cy, name, regionName }) => {
+    const label = `${name} (${regionName})`;
+    const tw = ctx.measureText(label).width;
+    const lx = Math.max(5, Math.min(cx - tw / 2, w - tw - 5));
+    const ly = cy + 12;
+    ctx.fillText(label, lx, ly);
   });
 
   // Hover tooltip
@@ -541,21 +578,35 @@ async function eveMapLoadRegion(systemId) {
   // For cross-region jump bridges, we need to fetch the destination system data
   // Request additional system data for jump bridge endpoints from the main process
   if (data.jumpBridges && data.jumpBridges.length > 0) {
+    console.log('Jump bridges available:', data.jumpBridges);
     const missingSystemIds = [];
     data.jumpBridges.forEach(([a, b]) => {
+      console.log(`Checking JB ${a} -> ${b}: in index? ${a}:${!!eveMap.systemIndex[a]}, ${b}:${!!eveMap.systemIndex[b]}`);
       if (!eveMap.systemIndex[a]) missingSystemIds.push(a);
       if (!eveMap.systemIndex[b]) missingSystemIds.push(b);
     });
 
+    console.log('Missing system IDs:', missingSystemIds);
     if (missingSystemIds.length > 0) {
       console.log('Fetching cross-region jump bridge endpoint data:', missingSystemIds.length);
       ipcRenderer.invoke('eve-get-systems', { systemIds: missingSystemIds }).then(systems => {
-        systems.forEach(s => {
-          eveMap.systemIndex[s.id] = s;
-        });
-        console.log('Cross-region systems added to index:', systems.length);
+        console.log('eve-get-systems returned:', systems);
+        if (systems && systems.length > 0) {
+          systems.forEach(s => {
+            eveMap.systemIndex[s.id] = s;
+          });
+          console.log('Cross-region systems added to index:', systems.length);
+        } else {
+          console.warn('No cross-region systems returned');
+        }
+      }).catch(err => {
+        console.error('Failed to fetch cross-region systems:', err);
       });
+    } else {
+      console.log('No missing system IDs - all JB endpoints already loaded');
     }
+  } else {
+    console.log('No jump bridges in data');
   }
 
   console.log('EVE map data loaded:', { systems: data.systems.length, connections: data.connections.length, jumpBridges: data.jumpBridges?.length || 0, regionName: data.regionName });
@@ -838,20 +889,7 @@ function saveRoster(accountId, roster) {
 //  Render
 // ─────────────────────────────────────────────
 function renderAccountBar() {
-  accountListEl.innerHTML = '';
-  state.accounts.forEach(acct => {
-    const btn = document.createElement('button');
-    btn.className = 'acct-btn ' + acct.color + (acct.id === state.activeAccountId ? ' active' : '');
-    btn.title = acct.displayName || acct.username;
-    btn.textContent = initials(acct.username);
-    const pip = document.createElement('span');
-    pip.className = 'acct-status-pip ' + (acct.status === 'online' ? 'dot-green' : acct.status === 'connecting' ? 'dot-amber' : 'dot-gray');
-    btn.appendChild(pip);
-    btn.addEventListener('click',       ()  => switchAccount(acct.id));
-    btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showAccountContextMenu(acct); });
-    accountListEl.appendChild(btn);
-  });
-  updateEveMapPanelVisibility();
+  // Account bar functionality removed - reserved for future use
 }
 
 function renderLeftPanel() {
@@ -2963,7 +3001,6 @@ async function loadAndConnect() {
     loadActiveDMs(acct.id);
   });
   state.activeAccountId = state.accounts[0].id;
-  renderAccountBar();
   renderLeftPanel();
   renderEveMapPanel();
   initEveMapCanvas();
@@ -3662,8 +3699,9 @@ window.showBrowseRoomsModal = showBrowseRoomsModal;
 $('btn-minimize').addEventListener('click', () => ipcRenderer.send('window-minimize'));
 $('btn-maximize').addEventListener('click', () => ipcRenderer.send('window-maximize'));
 $('btn-close').addEventListener('click', () => ipcRenderer.send('window-close'));
-$('btn-add-account').addEventListener('click', showAddAccountModal);
-$('btn-welcome-add').addEventListener('click', showAddAccountModal);
+// Multi-account functionality removed
+// $('btn-add-account').addEventListener('click', showAddAccountModal);
+// $('btn-welcome-add').addEventListener('click', showAddAccountModal);
 $('eve-char-selector').addEventListener('change', (e) => {
   const id = Number(e.target.value);
   if (id) {
@@ -3715,16 +3753,6 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === ',') {
     e.preventDefault();
     showAccountSettingsModal();
-  }
-
-  // Ctrl/Cmd + 1-9: Switch to account by number
-  if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key)) {
-    e.preventDefault();
-    const accountNum = parseInt(e.key) - 1;
-    if (state.accounts[accountNum]) {
-      state.activeAccountId = state.accounts[accountNum].id;
-      renderLeftPanel();
-    }
   }
 
   // Reset idle timer on any key press
