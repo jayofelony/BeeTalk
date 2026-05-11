@@ -350,7 +350,7 @@ function eveSecColor(sec) {
 }
 
 function eveMapToCanvas(x, y) {
-  return { cx: x * eveMap.transform.scale + eveMap.transform.offsetX, cy: y * eveMap.transform.scale + eveMap.transform.offsetY };
+  return { cx: x * eveMap.transform.scale + eveMap.transform.offsetX, cy: -y * eveMap.transform.scale + eveMap.transform.offsetY };
 }
 
 function eveMapFitToCanvas() {
@@ -363,7 +363,7 @@ function eveMapFitToCanvas() {
   eveMap.fitScale = scale;
   eveMap.transform.scale = scale;
   eveMap.transform.offsetX = pad - minX * scale + ((eveMap.canvas.width - pad * 2) - rangeX * scale) / 2;
-  eveMap.transform.offsetY = pad - minY * scale + ((eveMap.canvas.height - pad * 2) - rangeY * scale) / 2;
+  eveMap.transform.offsetY = pad + maxY * scale + ((eveMap.canvas.height - pad * 2) - rangeY * scale) / 2;
 }
 
 function eveMapDraw() {
@@ -374,6 +374,7 @@ function eveMapDraw() {
 
   ctx.fillStyle = isDark ? '#080810' : '#f5f5f7';
   ctx.fillRect(0, 0, w, h);
+
   if (!data) {
     console.warn('eveMapDraw: no data');
     return;
@@ -392,7 +393,7 @@ function eveMapDraw() {
   data.connections.forEach(([a, b]) => {
     const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
     if (!sa || !sb) return;
-    const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.z);
+    const pa = eveMapToCanvas(sa.x, sa.z), pb = eveMapToCanvas(sb.x, sb.z);
     ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
   });
 
@@ -430,7 +431,7 @@ function eveMapDraw() {
 
   // Hover tooltip
   if (eveMap.hovered) {
-    const { cx, cy } = eveMapToCanvas(eveMap.hovered.x, eveMap.hovered.y);
+    const { cx, cy } = eveMapToCanvas(eveMap.hovered.x, eveMap.hovered.z);
     let label = `${eveMap.hovered.name}  ${eveMap.hovered.security.toFixed(1)}`;
     if (eveMap.characterMarkers[eveMap.hovered.id]) {
       label += `  [${eveMap.characterMarkers[eveMap.hovered.id].map(c => c.characterName).join(', ')}]`;
@@ -522,13 +523,15 @@ async function eveMapLoadRegion(systemId) {
   eveMap.systemIndex = {};
   data.systems.forEach(s => { eveMap.systemIndex[s.id] = s; });
   console.log('EVE map data loaded:', { systems: data.systems.length, connections: data.connections.length, regionName: data.regionName });
-  if (eveMap.canvas) {
+
+  // Only fit to canvas on first load, not on updates
+  if (isFirstLoad && eveMap.canvas) {
     eveMap.canvas.width = eveMap.canvas.parentElement.clientWidth;
     eveMap.canvas.height = eveMap.canvas.parentElement.clientHeight;
     console.log('Canvas resized to:', { width: eveMap.canvas.width, height: eveMap.canvas.height });
     eveMapFitToCanvas();
     console.log('Canvas fit applied');
-  } else {
+  } else if (!eveMap.canvas) {
     console.error('No canvas available to render map');
   }
 }

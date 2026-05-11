@@ -99,7 +99,8 @@ The app can link EVE Online characters to XMPP accounts via OAuth2. When a chara
 - Stores character reference in account's `eveCharacters[]` array
 
 **EVE Map Canvas** (`src/app.js`):
-- 2D interactive map showing all systems in a region (fetched from ESI API)
+- 2D interactive map showing all systems in a region (from Static Data Export preload)
+- Uses official `position2D` coordinates from CCP's SDE (matches Dotlan/in-game map orientation)
 - Multi-character support: shows all linked characters' locations simultaneously
 - Focus on most recently updated character: highlighted with blue pulsing glow, auto-centers
 - Character selector dropdown to manually focus on a specific character
@@ -108,7 +109,7 @@ The app can link EVE Online characters to XMPP accounts via OAuth2. When a chara
 - All characters shown with orange glow; region stargate connections drawn as lines
 
 **EVE Map Functions**:
-- `eveMapLoadRegion(systemId)` — Fetches region data from ESI, builds system index
+- `eveMapLoadRegion(systemId)` — Looks up cached region data from preloaded SDE, returns instantly
 - `eveMapDraw()` — Renders canvas each frame: background, connections, systems, tooltips
 - `eveMapAnimate()` — requestAnimationFrame loop
 - `initEveMapCanvas()` — Canvas initialization, event handlers (drag, zoom, hover)
@@ -124,19 +125,21 @@ The app can link EVE Online characters to XMPP accounts via OAuth2. When a chara
 - **Note:** EVE cache parsing was explored but determined impractical (CCP uses proprietary binary format requiring reverse-engineering)
 
 **EVE Data Flow**:
-1. Main process polls EVE cache or ESI every 5 seconds
+1. Main process polls character locations via ESI every 10 seconds
 2. Sends `eve-location-update` when character location changes
 3. Renderer receives event, updates `eveLocationState[characterId]`
 4. Sets `eveTrackedCharacterId` to the most recently updated character
-5. Calls `eveMapLoadRegion(systemId)` to fetch region data from ESI
+5. Calls `eveMapLoadRegion(systemId)` to look up cached region data from SDE
 6. Canvas auto-centers on that system with blue pulsing indicator
 7. All other linked characters shown with orange glow on the map
 
-**ESI Integration** (`eve-load-region-map` handler):
-- Fetches system data from https://esi.evetech.net/latest
-- Returns all systems in a region with coordinates (x, z from 3D space)
-- Fetches stargate connections between systems
-- Returns: `{ regionName, currentSystemId, systems: [...], connections: [[sysA, sysB], ...] }`
+**Static Data Export (SDE) Integration**:
+- Pre-loaded on app startup via `preloadEveUniverse()` from `assets/eve-sde/`
+- Includes all regions, systems, stargates, and official position2D coordinates
+- JSONL files: mapSolarSystems.jsonl, mapRegions.jsonl, mapStargates.jsonl (~8.5 MB total)
+- Uses official CCP position2D instead of calculating from 3D coordinates
+- `eve-load-region-map` handler returns cached region data instantly
+- Returns: `{ regionName, regionId, currentSystemId, systems: [...], connections: [[sysA, sysB], ...] }`
 
 ### Message Rendering
 

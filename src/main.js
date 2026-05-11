@@ -987,117 +987,135 @@ ipcMain.handle('eve-get-characters', async (e, { accountId }) => {
   return account?.eveCharacters || [];
 });
 
+// ─────────────────────────────────────────────
+//  EVE Universe Preload from Static Data Export
+// ─────────────────────────────────────────────
+const eveUniverseCache = { regions: {}, systems: {}, stargates: {} };
+let eveUniverseLoaded = false;
 
-ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
+function parseJsonl(content) {
+  const lines = content.trim().split('\n');
+  return lines.map(line => JSON.parse(line));
+}
+
+async function preloadEveUniverse() {
+  if (eveUniverseLoaded) return;
+  console.log('Preloading EVE universe data from Static Data Export...');
+
   try {
-    console.log(`eve-load-region-map: loading region for system ${systemId}`);
+    const fs = require('fs');
+    const sdeDir = path.join(__dirname, '../assets/eve-sde');
 
-    const esi = 'https://esi.evetech.net/latest';
+    // Load SDE data files
+    const systemsData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapSolarSystems.jsonl'), 'utf8'));
+    const regionsData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapRegions.jsonl'), 'utf8'));
+    const stargatesData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapStargates.jsonl'), 'utf8'));
 
-    // Get system info to find its region
-    const systemResp = await fetch(`${esi}/universe/systems/${systemId}/`);
-    console.log(`System response status: ${systemResp.status}`);
-    if (!systemResp.ok) {
-      console.error(`Failed to fetch system ${systemId}: ${systemResp.status}`);
-      return null;
+    console.log(`Loaded ${systemsData.length} systems, ${regionsData.length} regions, ${stargatesData.length} stargates`);
+
+    // Build system index
+    const systemIndex = {};
+    for (const sys of systemsData) {
+      systemIndex[sys._key] = sys;
+      eveUniverseCache.systems[sys._key] = sys;
     }
-    const system = await systemResp.json();
-    const constellationId = system.constellation_id;
-    console.log(`System ${systemId} is in constellation ${constellationId}`);
 
-    // Get constellation to find region
-    const constResp = await fetch(`${esi}/universe/constellations/${constellationId}/`);
-    if (!constResp.ok) {
-      console.error(`Failed to fetch constellation ${constellationId}: ${constResp.status}`);
-      return null;
-    }
-    const constellation = await constResp.json();
-    const regionId = constellation.region_id;
-    console.log(`Constellation is in region ${regionId}`);
-
-    // Get region info and all systems in this region
-    const regionResp = await fetch(`${esi}/universe/regions/${regionId}/`);
-    console.log(`Region response status: ${regionResp.status}`);
-    if (!regionResp.ok) {
-      console.error(`Failed to fetch region ${regionId}: ${regionResp.status}`);
-      return null;
-    }
-    const apiRegionData = await regionResp.json();
-    // Region contains constellations array, we need to get systems from each constellation
-    const constellationIds = apiRegionData.constellations || [];
-    console.log(`Region has ${constellationIds.length} constellations`);
-
-    const systemIds = [];
-    for (const constId of constellationIds) {
-      try {
-        const cResp = await fetch(`${esi}/universe/constellations/${constId}/`);
-        if (cResp.ok) {
-          const cData = await cResp.json();
-          systemIds.push(...(cData.systems || []));
-        }
-      } catch (err) {
-        console.warn(`Failed to fetch constellation ${constId}:`, err.message);
+    // Build stargate connections
+    const stargatesBySystem = {};
+    for (const gate of stargatesData) {
+      if (!stargatesBySystem[gate.solarSystemID]) {
+        stargatesBySystem[gate.solarSystemID] = [];
       }
-    }
-    console.log(`Region has ${systemIds.length} systems`);
-
-    // Fetch all system details
-    const systems = [];
-    const systemDetails = {};
-
-    for (const sysId of systemIds) {
-      try {
-        const resp = await fetch(`${esi}/universe/systems/${sysId}/`);
-        if (!resp.ok) continue;
-        const sys = await resp.json();
-        systems.push({
-          id: sysId,
-          name: sys.name,
-          x: sys.position?.x || 0,
-          y: sys.position?.y || 0,
-          z: sys.position?.z || 0,
-          security: sys.security_status || 0
-        });
-        systemDetails[sysId] = sys;
-      } catch (err) {
-        console.error(`Failed to fetch system ${sysId}:`, err.message);
-      }
+      stargatesBySystem[gate.solarSystemID].push(gate);
     }
 
-    // Build connections: systems connected by stargates
-    const connections = [];
-    const connectionSet = new Set();
+    // Build regions with systems and connections
+    for (const region of regionsData) {
+      const regionSystems = systemsData.filter(s => s.regionID === region._key);
+      const regionSystemIds = new Set(regionSystems.map(s => s._key));
 
-    for (const sys of systems) {
-      const sysData = systemDetails[sys.id];
-      if (sysData?.stargates) {
-        for (const gate of sysData.stargates) {
-          try {
-            const gateResp = await fetch(`${esi}/universe/stargates/${gate}/`);
-            if (gateResp.ok) {
-              const gateData = await gateResp.json();
-              const destSystemId = gateData.destination?.system_id;
-              if (destSystemId && systemIds.includes(destSystemId)) {
-                const pair = [Math.min(sys.id, destSystemId), Math.max(sys.id, destSystemId)].join(',');
-                if (!connectionSet.has(pair)) {
-                  connectionSet.add(pair);
-                  connections.push([sys.id, destSystemId]);
-                }
-              }
+      // Build connections (stargates within this region)
+      const connections = [];
+      const connectionSet = new Set();
+
+      for (const sys of regionSystems) {
+        const gates = stargatesBySystem[sys._key] || [];
+        for (const gate of gates) {
+          const destSysId = gate.destination.solarSystemID;
+          if (regionSystemIds.has(destSysId)) {
+            const pair = [Math.min(sys._key, destSysId), Math.max(sys._key, destSysId)].join(',');
+            if (!connectionSet.has(pair)) {
+              connectionSet.add(pair);
+              connections.push([sys._key, destSysId]);
             }
-          } catch (err) {
-            // Ignore individual gate fetch errors
           }
         }
       }
+
+      // Build system list using official position2D
+      const systems = regionSystems.map(sys => {
+        const sysName = typeof sys.name === 'object' ? (sys.name.en || Object.values(sys.name)[0]) : sys.name;
+        return {
+          id: sys._key,
+          name: sysName,
+          x: sys.position2D?.x || 0,
+          y: sys.position2D?.y || 0,
+          z: 0,
+          security: sys.securityStatus || 0
+        };
+      });
+
+      const regionName = typeof region.name === 'object' ? (region.name.en || Object.values(region.name)[0]) : region.name;
+      eveUniverseCache.regions[region._key] = {
+        regionName,
+        regionId: region._key,
+        systems,
+        connections
+      };
+
+      if (region._key === 10000006) {
+        console.log(`Wicked Creek: ${systems.length} systems, ${connections.length} connections`);
+      }
+    }
+
+    eveUniverseLoaded = true;
+    console.log('EVE universe preload complete');
+  } catch (err) {
+    console.error('Failed to preload EVE universe:', err);
+  }
+}
+
+ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
+  try {
+    console.log(`eve-load-region-map: looking up cached data for system ${systemId}`);
+
+    // Find the system in cache
+    const system = eveUniverseCache.systems[systemId];
+    if (!system) {
+      console.error(`System ${systemId} not found in cache`);
+      return null;
+    }
+
+    // Find the region that contains this system
+    let targetRegion = null;
+    for (const [regionId, regionData] of Object.entries(eveUniverseCache.regions)) {
+      if (regionData.systems.some(s => s.id === systemId)) {
+        targetRegion = regionData;
+        break;
+      }
+    }
+
+    if (!targetRegion) {
+      console.error(`Region for system ${systemId} not found in cache`);
+      return null;
     }
 
     return {
-      regionName: apiRegionData.name,
-      regionId,
+      regionName: targetRegion.regionName,
+      regionId: targetRegion.regionId,
       currentSystemId: systemId,
-      systems,
-      connections
+      systems: targetRegion.systems,
+      connections: targetRegion.connections
     };
   } catch (err) {
     console.error('eve-load-region-map error:', err);
@@ -1489,6 +1507,7 @@ app.whenReady().then(async () => {
   cleanupLegacyElectronShortcut();
   createWindow();
   createTray();
+  preloadEveUniverse();  // Preload EVE universe data from ESI (RIFT approach)
   startEveLocationPolling();  // Start polling EVE character locations
 
   // Check for updates 10 seconds after app starts
