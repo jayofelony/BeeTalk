@@ -1004,12 +1004,21 @@ async function preloadEveUniverse() {
 
   try {
     const fs = require('fs');
-    const sdeDir = path.join(__dirname, '../assets/eve-sde');
+    const assetsDir = path.join(__dirname, '../assets');
+    const sdeDir = path.join(assetsDir, 'eve-sde');
 
     // Load SDE data files
     const systemsData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapSolarSystems.jsonl'), 'utf8'));
     const regionsData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapRegions.jsonl'), 'utf8'));
     const stargatesData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapStargates.jsonl'), 'utf8'));
+
+    // Load jump bridges
+    let jumpBridgesData = {};
+    try {
+      jumpBridgesData = JSON.parse(fs.readFileSync(path.join(assetsDir, 'jump-bridges.json'), 'utf8'));
+    } catch (err) {
+      console.warn('No jump bridges file found');
+    }
 
     console.log(`Loaded ${systemsData.length} systems, ${regionsData.length} regions, ${stargatesData.length} stargates`);
 
@@ -1052,6 +1061,25 @@ async function preloadEveUniverse() {
         }
       }
 
+      // Build jump bridges for this region
+      const jumpBridges = [];
+      if (region._key === 10000006) {  // Wicked Creek
+        const regionJumpBridges = jumpBridgesData.wickedCreek || [];
+        const systemNameToId = {};
+        regionSystems.forEach(s => {
+          const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
+          systemNameToId[sysName] = s._key;
+        });
+
+        for (const [fromName, toName] of regionJumpBridges) {
+          const fromId = systemNameToId[fromName];
+          const toId = systemNameToId[toName];
+          if (fromId && toId) {
+            jumpBridges.push([fromId, toId]);
+          }
+        }
+      }
+
       // Build system list using official position2D
       const systems = regionSystems.map(sys => {
         const sysName = typeof sys.name === 'object' ? (sys.name.en || Object.values(sys.name)[0]) : sys.name;
@@ -1070,7 +1098,8 @@ async function preloadEveUniverse() {
         regionName,
         regionId: region._key,
         systems,
-        connections
+        connections,
+        jumpBridges
       };
 
       if (region._key === 10000006) {

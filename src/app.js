@@ -326,7 +326,8 @@ const eveMap = {
   transform: { scale: 1, offsetX: 0, offsetY: 0 }, fitScale: 1,
   dragging: false, dragOrigin: { x: 0, y: 0 }, hovered: null,
   focusSystemId: null, pulsePhase: 0, loadingRegionId: null,
-  characterMarkers: {}  // systemId -> [{ characterId, characterName }, ...]
+  characterMarkers: {},  // systemId -> [{ characterId, characterName }, ...]
+  showJumpBridges: true
 };
 
 function eveGetTheme() {
@@ -387,7 +388,7 @@ function eveMapDraw() {
   eveMap.pulsePhase = (eveMap.pulsePhase + 0.04) % (Math.PI * 2);
   const dotR = 2;
 
-  // Connections
+  // Connections (stargates)
   ctx.strokeStyle = isDark ? 'rgba(60, 80, 140, 0.35)' : 'rgba(150, 150, 200, 0.25)';
   ctx.lineWidth = 0.6;
   data.connections.forEach(([a, b]) => {
@@ -396,6 +397,20 @@ function eveMapDraw() {
     const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.y);
     ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
   });
+
+  // Jump bridges
+  if (eveMap.showJumpBridges && data.jumpBridges) {
+    ctx.strokeStyle = isDark ? 'rgba(255, 100, 100, 0.4)' : 'rgba(200, 50, 50, 0.3)';
+    ctx.lineWidth = 0.8;
+    ctx.setLineDash([3, 3]);
+    data.jumpBridges.forEach(([a, b]) => {
+      const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
+      if (!sa || !sb) return;
+      const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.y);
+      ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
+    });
+    ctx.setLineDash([]);
+  }
 
   // Systems with character markers
   eveMap.characterMarkers = {};
@@ -2955,6 +2970,12 @@ function updateEveMapPanelVisibility() {
     console.warn('eve-map-panel element not found');
   }
 }
+
+document.getElementById('btn-jump-bridges')?.addEventListener('click', () => {
+  eveMap.showJumpBridges = !eveMap.showJumpBridges;
+  const btn = document.getElementById('btn-jump-bridges');
+  btn.textContent = `Jump Bridges: ${eveMap.showJumpBridges ? 'ON' : 'OFF'}`;
+});
 
 // ─────────────────────────────────────────────
 //  App Settings
