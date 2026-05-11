@@ -349,21 +349,21 @@ function eveSecColor(sec) {
   return '#8F3068';                           // Purple (0.0-0.09, null sec)
 }
 
-function eveMapToCanvas(x, z) {
-  return { cx: x * eveMap.transform.scale + eveMap.transform.offsetX, cy: z * eveMap.transform.scale + eveMap.transform.offsetY };
+function eveMapToCanvas(x, y) {
+  return { cx: x * eveMap.transform.scale + eveMap.transform.offsetX, cy: y * eveMap.transform.scale + eveMap.transform.offsetY };
 }
 
 function eveMapFitToCanvas() {
   if (!eveMap.data?.systems || !eveMap.canvas) return;
   const sys = eveMap.data.systems;
-  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-  sys.forEach(s => { minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x); minZ = Math.min(minZ, s.z); maxZ = Math.max(maxZ, s.z); });
-  const pad = 50, rangeX = maxX - minX || 1, rangeZ = maxZ - minZ || 1;
-  const scale = Math.min((eveMap.canvas.width - pad * 2) / rangeX, (eveMap.canvas.height - pad * 2) / rangeZ);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  sys.forEach(s => { minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x); minY = Math.min(minY, s.y); maxY = Math.max(maxY, s.y); });
+  const pad = 50, rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
+  const scale = Math.min((eveMap.canvas.width - pad * 2) / rangeX, (eveMap.canvas.height - pad * 2) / rangeY);
   eveMap.fitScale = scale;
   eveMap.transform.scale = scale;
   eveMap.transform.offsetX = pad - minX * scale + ((eveMap.canvas.width - pad * 2) - rangeX * scale) / 2;
-  eveMap.transform.offsetY = pad - minZ * scale + ((eveMap.canvas.height - pad * 2) - rangeZ * scale) / 2;
+  eveMap.transform.offsetY = pad - minY * scale + ((eveMap.canvas.height - pad * 2) - rangeY * scale) / 2;
 }
 
 function eveMapDraw() {
@@ -392,7 +392,7 @@ function eveMapDraw() {
   data.connections.forEach(([a, b]) => {
     const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
     if (!sa || !sb) return;
-    const pa = eveMapToCanvas(sa.x, sa.z), pb = eveMapToCanvas(sb.x, sb.z);
+    const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.z);
     ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
   });
 
@@ -407,7 +407,7 @@ function eveMapDraw() {
   }
 
   data.systems.forEach(sys => {
-    const { cx, cy } = eveMapToCanvas(sys.x, sys.z);
+    const { cx, cy } = eveMapToCanvas(sys.x, sys.y);
     if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
     const isFocus = sys.id === eveMap.focusSystemId;
     const isHovered = eveMap.hovered?.id === sys.id;
@@ -430,7 +430,7 @@ function eveMapDraw() {
 
   // Hover tooltip
   if (eveMap.hovered) {
-    const { cx, cy } = eveMapToCanvas(eveMap.hovered.x, eveMap.hovered.z);
+    const { cx, cy } = eveMapToCanvas(eveMap.hovered.x, eveMap.hovered.y);
     let label = `${eveMap.hovered.name}  ${eveMap.hovered.security.toFixed(1)}`;
     if (eveMap.characterMarkers[eveMap.hovered.id]) {
       label += `  [${eveMap.characterMarkers[eveMap.hovered.id].map(c => c.characterName).join(', ')}]`;
@@ -484,7 +484,7 @@ function initEveMapCanvas() {
     if (!eveMap.data) return;
     let best = null, bestD = 12;
     eveMap.data.systems.forEach(sys => {
-      const { cx, cy } = eveMapToCanvas(sys.x, sys.z);
+      const { cx, cy } = eveMapToCanvas(sys.x, sys.y);
       const d = Math.hypot(cx - mx, cy - my);
       if (d < bestD) { best = sys; bestD = d; }
     });
