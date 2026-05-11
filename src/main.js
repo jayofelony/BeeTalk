@@ -1061,20 +1061,33 @@ async function preloadEveUniverse() {
         }
       }
 
-      // Build jump bridges for this region
+      // Build jump bridges for this region (only intra-region bridges)
       const jumpBridges = [];
       if (region._key === 10000006) {  // Wicked Creek
         const regionJumpBridges = jumpBridgesData.wickedCreek || [];
         const systemNameToId = {};
+        const regionSystemIds = new Set(regionSystems.map(s => s._key));
+
+        // Build index for this region
         regionSystems.forEach(s => {
           const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
           systemNameToId[sysName] = s._key;
         });
 
+        // Build index for ALL systems to find destinations
+        const allSystemNameToId = {};
+        const allSystemIdToRegion = {};
+        systemsData.forEach(s => {
+          const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
+          allSystemNameToId[sysName] = s._key;
+          allSystemIdToRegion[s._key] = s.regionID;
+        });
+
         for (const [fromName, toName] of regionJumpBridges) {
-          const fromId = systemNameToId[fromName];
-          const toId = systemNameToId[toName];
-          if (fromId && toId) {
+          const fromId = allSystemNameToId[fromName];
+          const toId = allSystemNameToId[toName];
+          // Only include if BOTH endpoints are in this region
+          if (fromId && toId && regionSystemIds.has(fromId) && regionSystemIds.has(toId)) {
             jumpBridges.push([fromId, toId]);
           }
         }
@@ -1103,7 +1116,7 @@ async function preloadEveUniverse() {
       };
 
       if (region._key === 10000006) {
-        console.log(`Wicked Creek: ${systems.length} systems, ${connections.length} connections`);
+        console.log(`Wicked Creek: ${systems.length} systems, ${connections.length} stargate connections, ${jumpBridges.length} jump bridges`);
       }
     }
 
@@ -1144,7 +1157,8 @@ ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
       regionId: targetRegion.regionId,
       currentSystemId: systemId,
       systems: targetRegion.systems,
-      connections: targetRegion.connections
+      connections: targetRegion.connections,
+      jumpBridges: targetRegion.jumpBridges || []
     };
   } catch (err) {
     console.error('eve-load-region-map error:', err);
