@@ -393,7 +393,7 @@ function eveMapDraw() {
   data.connections.forEach(([a, b]) => {
     const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
     if (!sa || !sb) return;
-    const pa = eveMapToCanvas(sa.x, sa.z), pb = eveMapToCanvas(sb.x, sb.z);
+    const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.y);
     ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
   });
 
