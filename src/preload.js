@@ -35,4 +35,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadMessageHistory: (data) => ipcRenderer.invoke('load-message-history', data),
   discoverRooms: (data) => ipcRenderer.invoke('discover-rooms', data),
   checkUpdate: () => ipcRenderer.invoke('check-update'),
+
+  // EVE Online character management
+  eveLinkCharacter: (data) => ipcRenderer.invoke('eve-link-character', data),
+  eveUnlinkCharacter: (data) => ipcRenderer.invoke('eve-unlink-character', data),
+  eveGetCharacters: (data) => ipcRenderer.invoke('eve-get-characters', data),
+  eveLoadRegionMap: (data) => ipcRenderer.invoke('eve-load-region-map', data),
+  onEveCharacterLinked: (callback) => ipcRenderer.on('eve-character-linked', callback),
+  onEveLocationUpdate: (callback) => ipcRenderer.on('eve-location-update', callback),
 });

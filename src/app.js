@@ -52,6 +52,10 @@ const state = {
   userIsIdle: false
 };
 
+// EVE location state: characterId -> { systemId, systemName, regionName, characterName, accountId }
+const eveLocationState = {};
+let eveTrackedCharacterId = null;  // which character the map is currently showing
+
 // ─────────────────────────────────────────────
 //  DOM refs
 // ─────────────────────────────────────────────
@@ -288,6 +292,263 @@ ipcRenderer.on('xmpp-roster', (e, { accountId, contacts }) => {
 
   if (state.activeAccountId === accountId) renderLeftPanel();
 });
+
+ipcRenderer.on('eve-character-linked', (e, { accountId, characterId, characterName }) => {
+  const acct = state.accounts.find(a => a.id === accountId);
+  if (acct) {
+    if (!acct.eveCharacters) acct.eveCharacters = [];
+    if (!acct.eveCharacters.find(c => c.characterId === characterId)) {
+      acct.eveCharacters.push({ characterId, characterName });
+    }
+  }
+  updateEveMapPanelVisibility();
+});
+
+ipcRenderer.on('eve-location-update', (e, { accountId, characterId, characterName, systemId, systemName, regionName }) => {
+  console.log('eve-location-update:', { characterName, systemName, regionName });
+  eveLocationState[characterId] = { accountId, characterId, characterName, systemId, systemName, regionName };
+  eveTrackedCharacterId = characterId;  // Most recently updated character
+  renderEveMapPanel();
+  if (eveMap.canvas) {
+    console.log('Canvas ready, loading region');
+    eveMap.focusSystemId = systemId;
+    eveMapLoadRegion(systemId);
+  } else {
+    console.warn('eve-map-canvas not initialized yet');
+  }
+});
+
+// ─────────────────────────────────────────────
+//  EVE Map Canvas Renderer
+// ─────────────────────────────────────────────
+const eveMap = {
+  canvas: null, ctx: null, data: null, systemIndex: {}, animFrame: null,
+  transform: { scale: 1, offsetX: 0, offsetY: 0 }, fitScale: 1,
+  dragging: false, dragOrigin: { x: 0, y: 0 }, hovered: null,
+  focusSystemId: null, pulsePhase: 0, loadingRegionId: null,
+  characterMarkers: {}  // systemId -> [{ characterId, characterName }, ...]
+};
+
+function eveGetTheme() {
+  return document.documentElement.getAttribute('data-theme') || 'dark';
+}
+
+function eveSecColor(sec) {
+  if (sec >= 1.0) return '#2FEFEF'; if (sec >= 0.9) return '#48F0C0'; if (sec >= 0.8) return '#00EF47';
+  if (sec >= 0.7) return '#00F000'; if (sec >= 0.6) return '#8FEF2F'; if (sec >= 0.5) return '#EFEF00';
+  if (sec >= 0.4) return '#D77700'; if (sec >= 0.3) return '#F06000'; if (sec >= 0.2) return '#F04800';
+  if (sec >= 0.1) return '#D73000'; return '#F00000';
+}
+
+function eveMapToCanvas(x, z) {
+  return { cx: x * eveMap.transform.scale + eveMap.transform.offsetX, cy: z * eveMap.transform.scale + eveMap.transform.offsetY };
+}
+
+function eveMapFitToCanvas() {
+  if (!eveMap.data?.systems || !eveMap.canvas) return;
+  const sys = eveMap.data.systems;
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  sys.forEach(s => { minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x); minZ = Math.min(minZ, s.z); maxZ = Math.max(maxZ, s.z); });
+  const pad = 50, rangeX = maxX - minX || 1, rangeZ = maxZ - minZ || 1;
+  const scale = Math.min((eveMap.canvas.width - pad * 2) / rangeX, (eveMap.canvas.height - pad * 2) / rangeZ);
+  eveMap.fitScale = scale;
+  eveMap.transform.scale = scale;
+  eveMap.transform.offsetX = pad - minX * scale + ((eveMap.canvas.width - pad * 2) - rangeX * scale) / 2;
+  eveMap.transform.offsetY = pad - minZ * scale + ((eveMap.canvas.height - pad * 2) - rangeZ * scale) / 2;
+}
+
+function eveMapDraw() {
+  const { canvas, ctx, data, transform } = eveMap;
+  if (!canvas || !ctx) return;
+  const w = canvas.width, h = canvas.height;
+  const isDark = eveGetTheme() === 'dark';
+
+  ctx.fillStyle = isDark ? '#080810' : '#f5f5f7';
+  ctx.fillRect(0, 0, w, h);
+  if (!data) {
+    console.warn('eveMapDraw: no data');
+    return;
+  }
+  if (!eveMap._drawLoggedOnce) {
+    console.log('eveMapDraw: rendering', { systems: data.systems.length, canvas: `${w}x${h}` });
+    eveMap._drawLoggedOnce = true;
+  }
+
+  eveMap.pulsePhase = (eveMap.pulsePhase + 0.04) % (Math.PI * 2);
+  const dotR = 2;
+
+  // Connections
+  ctx.strokeStyle = isDark ? 'rgba(60, 80, 140, 0.35)' : 'rgba(150, 150, 200, 0.25)';
+  ctx.lineWidth = 0.6;
+  data.connections.forEach(([a, b]) => {
+    const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
+    if (!sa || !sb) return;
+    const pa = eveMapToCanvas(sa.x, sa.z), pb = eveMapToCanvas(sb.x, sb.z);
+    ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
+  });
+
+  // Systems with character markers
+  eveMap.characterMarkers = {};
+  for (const [charId, loc] of Object.entries(eveLocationState)) {
+    const sys = eveMap.systemIndex[loc.systemId];
+    if (sys) {
+      if (!eveMap.characterMarkers[loc.systemId]) eveMap.characterMarkers[loc.systemId] = [];
+      eveMap.characterMarkers[loc.systemId].push({ characterId: charId, characterName: loc.characterName });
+    }
+  }
+
+  data.systems.forEach(sys => {
+    const { cx, cy } = eveMapToCanvas(sys.x, sys.z);
+    if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
+    const isFocus = sys.id === eveMap.focusSystemId;
+    const isHovered = eveMap.hovered?.id === sys.id;
+    const hasCharacters = eveMap.characterMarkers[sys.id];
+    const color = eveSecColor(sys.security);
+
+    if (isFocus || hasCharacters) {
+      const glow = dotR * 5 + (isFocus ? Math.sin(eveMap.pulsePhase) * dotR * 2 : 0);
+      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
+      grad.addColorStop(0, isFocus ? 'rgba(91,142,240,0.6)' : 'rgba(200,150,50,0.4)');
+      grad.addColorStop(1, isFocus ? 'rgba(91,142,240,0)' : 'rgba(200,150,50,0)');
+      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx, cy, glow, 0, Math.PI * 2); ctx.fill();
+    } else if (isHovered) {
+      ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.beginPath(); ctx.arc(cx, cy, dotR * 3.5, 0, Math.PI * 2); ctx.fill();
+    }
+
+    ctx.fillStyle = isFocus ? '#5b8ef0' : hasCharacters ? '#c89632' : color;
+    ctx.beginPath(); ctx.arc(cx, cy, isFocus ? dotR * 2.5 : hasCharacters ? dotR * 1.8 : dotR, 0, Math.PI * 2); ctx.fill();
+  });
+
+  // Hover tooltip
+  if (eveMap.hovered) {
+    const { cx, cy } = eveMapToCanvas(eveMap.hovered.x, eveMap.hovered.z);
+    let label = `${eveMap.hovered.name}  ${eveMap.hovered.security.toFixed(1)}`;
+    if (eveMap.characterMarkers[eveMap.hovered.id]) {
+      label += `  [${eveMap.characterMarkers[eveMap.hovered.id].map(c => c.characterName).join(', ')}]`;
+    }
+    ctx.font = '11px -apple-system, Segoe UI, sans-serif';
+    const tw = ctx.measureText(label).width;
+    const lx = Math.min(cx + 10, w - tw - 10), ly = Math.max(cy - 10, 16);
+    ctx.fillStyle = isDark ? 'rgba(8, 8, 18, 0.85)' : 'rgba(255, 255, 255, 0.9)';
+    ctx.fillRect(lx - 5, ly - 13, tw + 10, 18);
+    ctx.fillStyle = eveSecColor(eveMap.hovered.security); ctx.fillText(label, lx, ly);
+  }
+
+  // Region name label
+  ctx.fillStyle = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.15)';
+  ctx.font = '11px -apple-system, Segoe UI, sans-serif';
+  ctx.fillText(data.regionName || '', 10, 16);
+}
+
+function eveMapAnimate() {
+  eveMapDraw();
+  eveMap.animFrame = requestAnimationFrame(eveMapAnimate);
+}
+
+function initEveMapCanvas() {
+  eveMap.canvas = document.getElementById('eve-map-canvas');
+  if (!eveMap.canvas) { console.warn('eve-map-canvas element not found'); return; }
+  eveMap.ctx = eveMap.canvas.getContext('2d');
+  console.log('EVE map canvas initialized:', { width: eveMap.canvas.width, height: eveMap.canvas.height });
+  const wrap = eveMap.canvas.parentElement;
+  new ResizeObserver(() => {
+    eveMap.canvas.width = wrap.clientWidth;
+    eveMap.canvas.height = wrap.clientHeight;
+    if (eveMap.data) eveMapFitToCanvas();
+  }).observe(wrap);
+  eveMap.canvas.width = wrap.clientWidth;
+  eveMap.canvas.height = wrap.clientHeight;
+
+  eveMap.canvas.addEventListener('mousedown', e => {
+    eveMap.dragging = true;
+    eveMap.dragOrigin = { x: e.clientX - eveMap.transform.offsetX, y: e.clientY - eveMap.transform.offsetY };
+  });
+  window.addEventListener('mouseup', () => { eveMap.dragging = false; });
+  eveMap.canvas.addEventListener('mousemove', e => {
+    const rect = eveMap.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    if (eveMap.dragging) {
+      eveMap.transform.offsetX = e.clientX - eveMap.dragOrigin.x;
+      eveMap.transform.offsetY = e.clientY - eveMap.dragOrigin.y;
+      return;
+    }
+    if (!eveMap.data) return;
+    let best = null, bestD = 12;
+    eveMap.data.systems.forEach(sys => {
+      const { cx, cy } = eveMapToCanvas(sys.x, sys.z);
+      const d = Math.hypot(cx - mx, cy - my);
+      if (d < bestD) { best = sys; bestD = d; }
+    });
+    eveMap.hovered = best;
+  });
+  eveMap.canvas.addEventListener('mouseleave', () => { eveMap.hovered = null; eveMap.dragging = false; });
+  eveMap.canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    const rect = eveMap.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+    const f = e.deltaY > 0 ? 0.85 : 1.18;
+    eveMap.transform.offsetX = mx + (eveMap.transform.offsetX - mx) * f;
+    eveMap.transform.offsetY = my + (eveMap.transform.offsetY - my) * f;
+    eveMap.transform.scale *= f;
+  }, { passive: false });
+
+  if (eveMap.animFrame) cancelAnimationFrame(eveMap.animFrame);
+  eveMapAnimate();
+}
+
+async function eveMapLoadRegion(systemId) {
+  if (!systemId) { console.warn('eveMapLoadRegion: no systemId'); return; }
+  console.log('eveMapLoadRegion: loading region for system', systemId);
+  // Only show loading on first load, not on updates
+  const isFirstLoad = !eveMap.data;
+  const loadingEl = document.getElementById('eve-map-loading');
+  if (isFirstLoad) loadingEl?.classList.add('visible');
+
+  const data = await ipcRenderer.invoke('eve-load-region-map', { systemId });
+  if (isFirstLoad) loadingEl?.classList.remove('visible');
+  if (!data) { console.error('eveMapLoadRegion: failed to load region data'); return; }
+  console.log('eveMapLoadRegion: loaded', { systems: data.systems?.length, region: data.regionName });
+
+  eveMap.data = data;
+  eveMap.systemIndex = {};
+  data.systems.forEach(s => { eveMap.systemIndex[s.id] = s; });
+  console.log('EVE map data loaded:', { systems: data.systems.length, connections: data.connections.length, regionName: data.regionName });
+  if (eveMap.canvas) {
+    eveMap.canvas.width = eveMap.canvas.parentElement.clientWidth;
+    eveMap.canvas.height = eveMap.canvas.parentElement.clientHeight;
+    console.log('Canvas resized to:', { width: eveMap.canvas.width, height: eveMap.canvas.height });
+    eveMapFitToCanvas();
+    console.log('Canvas fit applied');
+  } else {
+    console.error('No canvas available to render map');
+  }
+}
+
+function getAllEveCharacters() {
+  return state.accounts.flatMap(a => (a.eveCharacters || []).map(c => ({ ...c, accountId: a.id })));
+}
+
+function renderEveMapPanel() {
+  const selector = document.getElementById('eve-char-selector');
+  const locationLabel = document.getElementById('eve-map-location');
+  if (!selector || !locationLabel) return;
+
+  const chars = getAllEveCharacters();
+  selector.innerHTML = chars.length
+    ? chars.map(c => `<option value="${c.characterId}" ${Number(c.characterId) === eveTrackedCharacterId ? 'selected' : ''}>${esc(c.characterName)}</option>`).join('')
+    : '<option value="">No characters linked</option>';
+  selector.style.display = chars.length ? 'block' : 'none';
+  if (!eveTrackedCharacterId && chars.length) eveTrackedCharacterId = Number(chars[0].characterId);
+
+  const loc = eveTrackedCharacterId ? eveLocationState[eveTrackedCharacterId] : null;
+  if (loc) {
+    locationLabel.textContent = `${loc.characterName}  ·  ${loc.systemName}  (${loc.regionName || '…'})`;
+  } else if (chars.length) {
+    locationLabel.textContent = 'Fetching location…';
+  } else {
+    locationLabel.textContent = 'No EVE character linked';
+  }
+}
 
 ipcRenderer.on('app-focus', () => {
   state.appIsFocused = true;
@@ -542,6 +803,7 @@ function renderAccountBar() {
     btn.addEventListener('contextmenu', (e) => { e.preventDefault(); showAccountContextMenu(acct); });
     accountListEl.appendChild(btn);
   });
+  updateEveMapPanelVisibility();
 }
 
 function renderLeftPanel() {
@@ -1315,15 +1577,78 @@ window.submitAddAccount = () => {
 };
 
 function showAccountContextMenu(acct) {
+  const eveChars = acct.eveCharacters || [];
+  const eveListHtml = eveChars.length
+    ? eveChars.map(c => `
+        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
+          <span style="font-size:13px;flex:1;color:var(--text1)">${esc(c.characterName)}</span>
+          <span style="font-size:11px;color:var(--text3)">#${c.characterId}</span>
+          <button class="btn-danger" style="padding:2px 8px;font-size:11px"
+            onclick="unlinkEveCharacter('${esc(acct.id)}',${Number(c.characterId)})">Unlink</button>
+        </div>`).join('')
+    : '<div style="color:var(--text3);font-size:12px;padding:4px 0">No EVE characters linked yet.</div>';
+
   showModal(`
     <div class="modal-title">${esc(acct.displayName || acct.username + '@' + acct.server)}</div>
-    <div class="modal-actions">
+    <div style="margin:12px 0 0">
+      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">EVE Online Characters</div>
+      <div id="eve-chars-list">${eveListHtml}</div>
+      <button class="btn-secondary" id="btn-link-eve" style="margin-top:8px;width:100%"
+        onclick="linkEveCharacter('${esc(acct.id)}')">+ Link EVE Character</button>
+      <div id="eve-link-status" style="font-size:12px;margin-top:6px;min-height:18px;color:var(--text3)"></div>
+    </div>
+    <div class="modal-actions" style="margin-top:16px">
       <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary"   onclick="showEditAccountModal('${acct.id}')">Edit</button>
-      <button class="btn-danger"    onclick="removeAccount('${acct.id}')">Remove</button>
+      <button class="btn-primary"   onclick="showEditAccountModal('${esc(acct.id)}')">Edit</button>
+      <button class="btn-danger"    onclick="removeAccount('${esc(acct.id)}')">Remove</button>
     </div>
   `);
 }
+
+window.linkEveCharacter = async (accountId) => {
+  const btn = document.getElementById('btn-link-eve');
+  const statusEl = document.getElementById('eve-link-status');
+  if (btn) { btn.disabled = true; btn.textContent = 'Opening browser…'; }
+  if (statusEl) statusEl.textContent = 'Complete the EVE login in your browser…';
+
+  try {
+    const result = await ipcRenderer.invoke('eve-link-character', { accountId });
+    if (result.success) {
+      const acct = state.accounts.find(a => a.id === accountId);
+      if (acct) {
+        if (!acct.eveCharacters) acct.eveCharacters = [];
+        if (!acct.eveCharacters.find(c => c.characterId === result.characterId)) {
+          acct.eveCharacters.push({ characterId: result.characterId, characterName: result.characterName });
+        }
+        saveAccounts();
+        hideModal();
+        showAccountContextMenu(acct);
+      }
+    } else {
+      if (btn) { btn.disabled = false; btn.textContent = '+ Link EVE Character'; }
+      if (statusEl) statusEl.textContent = '⚠ ' + (result.error || 'Unknown error');
+    }
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = '+ Link EVE Character'; }
+    if (statusEl) statusEl.textContent = '⚠ ' + err.message;
+  }
+};
+
+window.unlinkEveCharacter = async (accountId, characterId) => {
+  const id = Number(characterId);
+  const acct = state.accounts.find(a => a.id === accountId);
+  const char = acct?.eveCharacters?.find(c => Number(c.characterId) === id);
+  if (!confirm(`Unlink EVE character "${char?.characterName || id}"?`)) return;
+
+  await ipcRenderer.invoke('eve-unlink-character', { accountId, characterId: id });
+
+  if (acct?.eveCharacters) {
+    acct.eveCharacters = acct.eveCharacters.filter(c => Number(c.characterId) !== id);
+    saveAccounts();
+  }
+  hideModal();
+  if (acct) showAccountContextMenu(acct);
+};
 
 window.showEditAccountModal = (id) => {
   const acct = state.accounts.find(a => a.id === id);
@@ -2471,8 +2796,8 @@ window.installUpdate = async (releaseUrl) => {
 //  Persistence
 // ─────────────────────────────────────────────
 function saveAccounts() {
-  const safe = state.accounts.map(({ id, username, password, server, port, displayName, color }) =>
-    ({ id, username, password, server, port, displayName, color })
+  const safe = state.accounts.map(({ id, username, password, server, port, displayName, color, eveCharacters }) =>
+    ({ id, username, password, server, port, displayName, color, eveCharacters: eveCharacters || [] })
   );
   ipcRenderer.send('save-accounts', safe);
 }
@@ -2573,7 +2898,7 @@ async function loadAndConnect() {
   const saved = await ipcRenderer.invoke('load-accounts');
   if (!saved?.length) return;
   saved.forEach(data => {
-    const acct = { ...data, status: 'offline', roster: {}, presence: 'available', jid: data.username + '@' + data.server, groups: {}, roomGroups: {} };
+    const acct = { ...data, status: 'offline', roster: {}, presence: 'available', jid: data.username + '@' + data.server, groups: {}, roomGroups: {}, eveCharacters: data.eveCharacters || [] };
 
     // Load saved roster from localStorage
     const savedRoster = getSavedRoster(acct.id);
@@ -2592,12 +2917,30 @@ async function loadAndConnect() {
   state.activeAccountId = state.accounts[0].id;
   renderAccountBar();
   renderLeftPanel();
+  renderEveMapPanel();
+  initEveMapCanvas();
+  updateEveMapPanelVisibility();
   state.accounts.forEach(a => ipcRenderer.send('xmpp-connect', a));
 
   // Apply saved theme on load
   const settings = getAppSettings();
   if (settings.theme) {
     setTheme(settings.theme);
+  }
+}
+
+function updateEveMapPanelVisibility() {
+  const hasEveCharacters = state.accounts.some(a => a.eveCharacters?.length > 0);
+  const panel = $('eve-map-panel');
+  if (panel) {
+    if (hasEveCharacters) {
+      panel.classList.add('visible');
+      console.log('EVE map panel visible, characters:', state.accounts.flatMap(a => a.eveCharacters || []));
+    } else {
+      panel.classList.remove('visible');
+    }
+  } else {
+    console.warn('eve-map-panel element not found');
   }
 }
 
@@ -3267,6 +3610,18 @@ $('btn-maximize').addEventListener('click', () => ipcRenderer.send('window-maxim
 $('btn-close').addEventListener('click', () => ipcRenderer.send('window-close'));
 $('btn-add-account').addEventListener('click', showAddAccountModal);
 $('btn-welcome-add').addEventListener('click', showAddAccountModal);
+$('eve-char-selector').addEventListener('change', (e) => {
+  const id = Number(e.target.value);
+  if (id) {
+    eveTrackedCharacterId = id;
+    renderEveMapPanel();
+    const loc = eveLocationState[id];
+    if (loc) {
+      eveMap.focusSystemId = loc.systemId;
+      eveMapLoadRegion(loc.systemId);
+    }
+  }
+});
 $('btn-browse-rooms').addEventListener('click', showBrowseRoomsModal);
 $('btn-settings').addEventListener('click', showAccountSettingsModal);
 btnReconnect.addEventListener('click', () => {

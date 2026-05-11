@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-BeeTalk is an Electron-based XMPP chat client for Windows that supports multi-account connectivity, group chats (MUC), message history, and system tray integration. It connects to XMPP servers (primarily GSF Jabber).
+BeeTalk is an Electron-based XMPP chat client for Windows that supports multi-account connectivity, group chats (MUC), message history, and system tray integration. It connects to XMPP servers (primarily GSF Jabber). It also includes EVE Online integration with an interactive region map that tracks all linked EVE character locations.
 
 ## Development Commands
 
@@ -82,6 +82,52 @@ Each account has its own XMPP client (`connections[accountId]._xmpp`). Accounts 
 - `xmpp-message`: New message received
 - `xmpp-room-users`: Participant list for a room
 - `xmpp-room-discovery`: Available rooms from server
+- `eve-character-linked`: Character successfully linked to XMPP account
+- `eve-location-update`: Character location changed (systemId, systemName, regionName)
+
+### EVE Online Integration
+
+The app can link EVE Online characters to XMPP accounts via OAuth2. When a character's location updates, it displays on an interactive regional map.
+
+**EVE OAuth Flow** (`src/main.js`):
+- User clicks "Link EVE Character"
+- App generates PKCE code verifier/challenge
+- Opens login.eveonline.com in browser
+- Receives authorization code via callback (port 7777)
+- Exchanges code for access/refresh tokens via `eve-link-character` IPC handler
+- Stores tokens in `electron-store` under `eveTokens[characterId]`
+- Stores character reference in account's `eveCharacters[]` array
+
+**EVE Map Canvas** (`src/app.js`):
+- 2D interactive map showing all systems in a region (fetched from ESI API)
+- Multi-character support: shows all linked characters' locations simultaneously
+- Focus on most recently updated character: highlighted with blue pulsing glow, auto-centers
+- Character selector dropdown to manually focus on a specific character
+- Hover tooltips show system name, security status, and character names
+- Pan with mouse drag, zoom with mouse wheel
+- All characters shown with orange glow; region stargate connections drawn as lines
+
+**EVE Map Functions**:
+- `eveMapLoadRegion(systemId)` — Fetches region data from ESI, builds system index
+- `eveMapDraw()` — Renders canvas each frame: background, connections, systems, tooltips
+- `eveMapAnimate()` — requestAnimationFrame loop
+- `initEveMapCanvas()` — Canvas initialization, event handlers (drag, zoom, hover)
+- `renderEveMapPanel()` — Updates character selector dropdown and location label
+- `updateEveMapPanelVisibility()` — Shows/hides EVE map panel based on linked characters
+
+**EVE Data Flow**:
+1. Main process sends `eve-location-update` when character location changes
+2. Renderer receives event, updates `eveLocationState[characterId]`
+3. Sets `eveTrackedCharacterId` to the most recently updated character
+4. Calls `eveMapLoadRegion(systemId)` to fetch region data from ESI
+5. Canvas auto-centers on that system with blue pulsing indicator
+6. All other linked characters shown with orange glow on the map
+
+**ESI Integration** (`eve-load-region-map` handler):
+- Fetches system data from https://esi.evetech.net/latest
+- Returns all systems in a region with coordinates (x, z from 3D space)
+- Fetches stargate connections between systems
+- Returns: `{ regionName, currentSystemId, systems: [...], connections: [[sysA, sysB], ...] }`
 
 ### Message Rendering
 
@@ -91,6 +137,8 @@ Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`) to avoid UI jank whe
 
 - **Accounts & Rooms**: Stored in `electron-store` (JSON file on disk), loaded on app start
 - **Passwords**: Stored in system keychain via keytar, never written to disk as plaintext
+- **EVE Tokens**: Stored in `electron-store` under `eveTokens[characterId]` (access/refresh tokens + expiry)
+- **EVE Characters**: Stored in each account's `eveCharacters[]` array in the accounts store
 - **XMPP Server Connection**: GSF Jabber hardcoded in `src/app.js` line ~732; can be changed at startup
 
 ### Idle Detection & Auto-Away
@@ -152,3 +200,6 @@ Light/dark theme is controlled by a CSS class on `<body>`. The theme choice is p
 - Reconnection logic uses exponential backoff timers; timers are stored in `reconnectTimers` map
 - MUC (Multi-User Chat) room join flow requires sending presence after joining; this is handled in main.js
 - Message Archive Management (MAM) queries for history happen on room join; they're paginated to avoid overload
+- **EVE OAuth**: Requires `EVE_CLIENT_ID` set in `src/main.js` (get from https://developers.eveonline.com/applications). Callback URL must be registered as `http://localhost:7777/callback`
+- **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). No local database required but adds startup delay for first region load
+- **EVE Token Storage**: Uses `electron-store` not keytar (keytar has size limits for large tokens). Tokens include expiry; refresh flow not yet implemented (tokens assumed valid for session duration)

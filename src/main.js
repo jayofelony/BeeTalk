@@ -1,12 +1,27 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell } = require('electron');
 const path = require('path');
+const crypto = require('crypto');
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
 const keytar = require('keytar');
+const Pickler = require('pickler');
 
 const store = new Store();
 const KEYTAR_SERVICE = 'BeeTalk';
 const OLD_KEYTAR_SERVICE = 'Gabber'; // for migration
+
+// ─────────────────────────────────────────────
+//  EVE Online ESI — set your Client ID from https://developers.eveonline.com/
+//  Callback URL to register: http://localhost:7777/callback
+// ─────────────────────────────────────────────
+const EVE_CLIENT_ID = '9f17e8fe55774cc596a699ad0dcd44c5';  // <-- paste your EVE application Client ID here
+const EVE_CALLBACK_PORT = 7777;
+const EVE_CALLBACK_URL = `http://localhost:${EVE_CALLBACK_PORT}/callback`;
+const EVE_AUTH_URL = 'https://login.eveonline.com/v2/oauth/authorize';
+const EVE_TOKEN_URL = 'https://login.eveonline.com/v2/oauth/token';
 
 let mainWindow;
 let tray;
@@ -17,6 +32,169 @@ const reconnectTimers = {}; // accountId -> timer handle
 
 // Ensure OS-level app identity uses BeeTalk instead of the Electron default name.
 app.setName('BeeTalk');
+
+// ─────────────────────────────────────────────
+//  EVE Cache Reading
+// ─────────────────────────────────────────────
+function findEveCacheDir() {
+  const appDataPath = path.join(os.homedir(), 'AppData', 'Local', 'CCP', 'EVE');
+
+  // Try both Tranquility and Singularity servers
+  const possibleDirs = [
+    path.join(appDataPath, 'c_ccp_eve_tq_tranquility', 'cache'),
+    path.join(appDataPath, 'c_ccp_eve_tq_tranquility', 'cache'),
+    path.join(appDataPath, 'c_ccp_eve_sisi_singularity', 'cache'),
+  ];
+
+  for (const dir of possibleDirs) {
+    if (fs.existsSync(dir)) {
+      return dir;
+    }
+  }
+
+  return null;
+}
+
+function getEveMachoNetPath(cacheDir) {
+  const machoDir = path.join(cacheDir, 'MachoNet');
+  if (!fs.existsSync(machoDir)) return null;
+
+  // Find first server directory (IP address)
+  const servers = fs.readdirSync(machoDir);
+  if (servers.length === 0) return null;
+
+  return path.join(machoDir, servers[0], '496', 'CachedObjects');
+}
+
+async function readEveLocationFromCache(characterId) {
+  try {
+    const cacheDir = findEveCacheDir();
+    if (!cacheDir) return null;
+
+    const objectsDir = getEveMachoNetPath(cacheDir);
+    if (!objectsDir) return null;
+
+    // Try to find and read cached location data
+    // EVE stores location info in various cache objects
+    // We'll look for character-related cache files
+    const cacheFiles = fs.readdirSync(objectsDir).filter(f => f.endsWith('.cache'));
+
+    for (const file of cacheFiles.slice(0, 50)) {
+      try {
+        const filePath = path.join(objectsDir, file);
+        const fileData = fs.readFileSync(filePath);
+
+        // Attempt to parse as pickle
+        // Note: this is experimental and may not work for all EVE cache formats
+        // If parsing fails, we fall back to ESI
+        if (fileData.length > 0) {
+          // Check for common pickle opcodes
+          if (fileData[0] === 0x80 || fileData[0] === 0x63) {  // pickle protocol markers
+            try {
+              const unpickler = new Pickler.Unpickler(fileData);
+              const data = unpickler.load();
+
+              // If we find character-related data with location, return it
+              if (data && typeof data === 'object') {
+                // Look for character location in the data structure
+                // This is fragile and depends on EVE's internal structure
+                if (data.solarSystemID || data.systemId || data.solarsystemid) {
+                  return {
+                    systemId: data.solarSystemID || data.systemId || data.solarsystemid,
+                    source: 'cache'
+                  };
+                }
+              }
+            } catch (err) {
+              // Pickle parse error, try next file
+              continue;
+            }
+          }
+        }
+      } catch (err) {
+        // File read error, try next file
+        continue;
+      }
+    }
+  } catch (err) {
+    console.error('Error reading EVE cache:', err.message);
+  }
+
+  return null;
+}
+
+// EVE character location polling
+let eveLocationPollTimer = null;
+async function fetchEveLocations() {
+  const eveTokens = store.get('eveTokens', {});
+  const accounts = store.get('accounts', []);
+
+  for (const [characterId, tokens] of Object.entries(eveTokens)) {
+    const account = accounts.find(a => a.eveCharacters?.some(c => c.characterId === Number(characterId)));
+    if (!account) continue;
+
+    const character = account.eveCharacters.find(c => c.characterId === Number(characterId));
+    if (!character) continue;
+
+    try {
+      let systemId = null;
+
+      // Try cache first (instant if EVE is running)
+      const cacheResult = await readEveLocationFromCache(characterId);
+      if (cacheResult) {
+        systemId = cacheResult.systemId;
+        console.log(`Character ${characterId} location from cache: ${systemId}`);
+      } else {
+        // Fall back to ESI API
+        const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
+          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
+        });
+        if (locResp.ok) {
+          const locData = await locResp.json();
+          systemId = locData.solar_system_id;
+          console.log(`Character ${characterId} location from ESI: ${systemId}`);
+        }
+      }
+
+      if (systemId) {
+        // Get system details
+        const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
+        if (systemResp.ok) {
+          const systemData = await systemResp.json();
+          const systemName = systemData.name;
+          let regionName = '';
+          try {
+            const constResp = await fetch(`https://esi.evetech.net/latest/universe/constellations/${systemData.constellation_id}/`);
+            if (constResp.ok) {
+              const constData = await constResp.json();
+              const regionResp = await fetch(`https://esi.evetech.net/latest/universe/regions/${constData.region_id}/`);
+              if (regionResp.ok) {
+                const regionData = await regionResp.json();
+                regionName = regionData.name;
+              }
+            }
+          } catch (err) {
+            // ignore
+          }
+          send('eve-location-update', { accountId: account.id, characterId: Number(characterId), characterName: character.characterName, systemId, systemName, regionName });
+        }
+      }
+    } catch (err) {
+      // ignore polling errors
+    }
+  }
+}
+function startEveLocationPolling() {
+  if (eveLocationPollTimer) return;
+  fetchEveLocations();  // Fetch immediately
+  eveLocationPollTimer = setInterval(fetchEveLocations, 5000);  // Poll every 5 seconds (cache reads are instant)
+}
+function stopEveLocationPolling() {
+  if (eveLocationPollTimer) {
+    clearInterval(eveLocationPollTimer);
+    eveLocationPollTimer = null;
+  }
+}
 
 // ─────────────────────────────────────────────
 //  Credential Management (Keytar)
@@ -650,6 +828,386 @@ ipcMain.handle('load-emoticons', async () => {
 });
 
 // ─────────────────────────────────────────────
+//  EVE Online OAuth2 + PKCE helpers
+// ─────────────────────────────────────────────
+function eveGenerateCodeVerifier() {
+  return crypto.randomBytes(32).toString('base64url');
+}
+
+function eveGenerateCodeChallenge(verifier) {
+  return crypto.createHash('sha256').update(verifier).digest('base64url');
+}
+
+function eveDecodeJwtPayload(token) {
+  try {
+    return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+ipcMain.handle('eve-link-character', async (e, { accountId }) => {
+  if (!EVE_CLIENT_ID) {
+    return { success: false, error: 'EVE_CLIENT_ID is not set. Edit src/main.js and paste your Client ID from https://developers.eveonline.com/' };
+  }
+
+  const codeVerifier = eveGenerateCodeVerifier();
+  const codeChallenge = eveGenerateCodeChallenge(codeVerifier);
+  const oauthState = crypto.randomBytes(8).toString('hex');
+
+  const params = new URLSearchParams({
+    response_type: 'code',
+    redirect_uri: EVE_CALLBACK_URL,
+    client_id: EVE_CLIENT_ID,
+    scope: [                                                  
+      'publicData',                                           
+      'esi-calendar.respond_calendar_events.v1',              
+      'esi-calendar.read_calendar_events.v1',                 
+      'esi-location.read_location.v1',                        
+      'esi-location.read_ship_type.v1',                       
+      'esi-mail.organize_mail.v1',                            
+      'esi-mail.read_mail.v1',                                
+      'esi-mail.send_mail.v1',                                
+      'esi-skills.read_skills.v1',                            
+      'esi-skills.read_skillqueue.v1',                        
+      'esi-wallet.read_character_wallet.v1',                  
+      'esi-wallet.read_corporation_wallet.v1',                
+      'esi-search.search_structures.v1',                      
+      'esi-clones.read_clones.v1',                            
+      'esi-characters.read_contacts.v1',                      
+      'esi-universe.read_structures.v1',                      
+      'esi-killmails.read_killmails.v1',                      
+      'esi-corporations.read_corporation_membership.v1',      
+      'esi-assets.read_assets.v1',                            
+      'esi-planets.manage_planets.v1',                        
+      'esi-fleets.read_fleet.v1',                             
+      'esi-fleets.write_fleet.v1',                            
+      'esi-ui.open_window.v1',                                
+      'esi-ui.write_waypoint.v1',                             
+      'esi-characters.write_contacts.v1',                     
+      'esi-fittings.read_fittings.v1',                        
+      'esi-fittings.write_fittings.v1',                       
+      'esi-markets.structure_markets.v1',                     
+      'esi-corporations.read_structures.v1',                  
+      'esi-characters.read_loyalty.v1',                       
+      'esi-characters.read_chat_channels.v1',                 
+      'esi-characters.read_medals.v1',                        
+      'esi-characters.read_standings.v1',                     
+      'esi-characters.read_agents_research.v1',               
+      'esi-industry.read_character_jobs.v1',                  
+      'esi-markets.read_character_orders.v1',                 
+      'esi-characters.read_blueprints.v1',                    
+      'esi-characters.read_corporation_roles.v1',             
+      'esi-location.read_online.v1',                          
+      'esi-contracts.read_character_contracts.v1',            
+      'esi-clones.read_implants.v1',                          
+      'esi-characters.read_fatigue.v1',                       
+      'esi-killmails.read_corporation_killmails.v1',          
+      'esi-corporations.track_members.v1',                    
+      'esi-wallet.read_corporation_wallets.v1',               
+      'esi-characters.read_notifications.v1',                 
+      'esi-corporations.read_divisions.v1',                   
+      'esi-corporations.read_contacts.v1',                    
+      'esi-assets.read_corporation_assets.v1',                
+      'esi-corporations.read_titles.v1',                      
+      'esi-corporations.read_blueprints.v1',                  
+      'esi-contracts.read_corporation_contracts.v1',          
+      'esi-corporations.read_standings.v1',                   
+      'esi-corporations.read_starbases.v1',                   
+      'esi-industry.read_corporation_jobs.v1',                
+      'esi-markets.read_corporation_orders.v1',               
+      'esi-corporations.read_container_logs.v1',              
+      'esi-industry.read_character_mining.v1',                
+      'esi-industry.read_corporation_mining.v1',              
+      'esi-planets.read_customs_offices.v1',                  
+      'esi-corporations.read_facilities.v1',                  
+      'esi-corporations.read_medals.v1',                      
+      'esi-characters.read_titles.v1',                        
+      'esi-alliances.read_contacts.v1',                       
+      'esi-characters.read_fw_stats.v1',                      
+      'esi-corporations.read_fw_stats.v1',                    
+      'esi-corporations.read_projects.v1',                    
+      'esi-corporations.read_freelance_jobs.v1',              
+      'esi-characters.read_freelance_jobs.v1',                
+      'esi-structures.read_corporation.v1',                   
+      'esi-structures.read_character.v1',                     
+      'esi-activities.read_character.v1',                     
+      'esi-access.read_lists.v1',                             
+    ].join(' '),                                              
+  state: oauthState,
+  code_challenge: codeChallenge,
+  code_challenge_method: 'S256'
+  });
+  const authUrl = `${EVE_AUTH_URL}?${params}`;
+
+  let code;
+  try {
+    code = await new Promise((resolve, reject) => {
+      let server;
+      const timeout = setTimeout(() => {
+        server?.close();
+        reject(new Error('Timed out waiting for EVE login (5 min).'));
+      }, 5 * 60 * 1000);
+
+      server = http.createServer((req, res) => {
+        const url = new URL(req.url, `http://localhost:${EVE_CALLBACK_PORT}`);
+        if (url.pathname !== '/callback') { res.writeHead(404); res.end(); return; }
+
+        const returnedCode = url.searchParams.get('code');
+        const returnedState = url.searchParams.get('state');
+
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        res.end('<html><body style="font-family:sans-serif;padding:40px"><h2>EVE login successful!</h2><p>You may close this tab and return to BeeTalk.</p></body></html>');
+        server.close();
+        clearTimeout(timeout);
+
+        if (returnedState !== oauthState) { reject(new Error('State mismatch — retry the link.')); return; }
+        if (!returnedCode) { reject(new Error('No authorisation code received.')); return; }
+        resolve(returnedCode);
+      });
+
+      server.on('error', (err) => { clearTimeout(timeout); reject(err); });
+      server.listen(EVE_CALLBACK_PORT, '127.0.0.1', () => shell.openExternal(authUrl));
+    });
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+
+  let tokens;
+  try {
+    const tokenRes = await fetch(EVE_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'authorization_code',
+        code,
+        client_id: EVE_CLIENT_ID,
+        code_verifier: codeVerifier,
+        redirect_uri: EVE_CALLBACK_URL
+      })
+    });
+    if (!tokenRes.ok) {
+      const text = await tokenRes.text();
+      return { success: false, error: `Token exchange failed: ${text}` };
+    }
+    tokens = await tokenRes.json();
+  } catch (err) {
+    return { success: false, error: `Token request error: ${err.message}` };
+  }
+
+  const payload = eveDecodeJwtPayload(tokens.access_token);
+  if (!payload) return { success: false, error: 'Could not decode EVE token.' };
+
+  const characterId = parseInt(payload.sub?.split(':')[2], 10);
+  const characterName = payload.name;
+  if (!characterId || !characterName) return { success: false, error: 'Token missing character info.' };
+
+  // Store EVE tokens (in store file, not keytar which has size limits)
+  const eveTokens = store.get('eveTokens', {});
+  eveTokens[characterId] = {
+    accessToken: tokens.access_token,
+    refreshToken: tokens.refresh_token,
+    expiresAt: Date.now() + (tokens.expires_in || 1200) * 1000
+  };
+  store.set('eveTokens', eveTokens);
+
+  const accounts = store.get('accounts', []);
+  const account = accounts.find(a => a.id === accountId);
+  if (account) {
+    if (!account.eveCharacters) account.eveCharacters = [];
+    if (!account.eveCharacters.find(c => c.characterId === characterId)) {
+      account.eveCharacters.push({ characterId, characterName });
+    }
+    store.set('accounts', accounts);
+    // Notify renderer that EVE character was linked
+    send('eve-character-linked', { accountId, characterId, characterName });
+
+    // Fetch character location and send to renderer
+    try {
+      console.log(`Fetching location for character ${characterId} with token...`);
+      const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
+        headers: { 'Authorization': `Bearer ${tokens.access_token}` }
+      });
+      console.log(`Location response status: ${locResp.status}`);
+      if (locResp.ok) {
+        const locData = await locResp.json();
+        console.log(`Character location: system ${locData.solar_system_id}`);
+        const systemId = locData.solar_system_id;
+        const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
+        if (systemResp.ok) {
+          const systemData = await systemResp.json();
+          const systemName = systemData.name;
+          console.log(`System: ${systemName}, sending eve-location-update`);
+          // Try to find region name
+          let regionName = '';
+          try {
+            const constResp = await fetch(`https://esi.evetech.net/latest/universe/constellations/${systemData.constellation_id}/`);
+            if (constResp.ok) {
+              const constData = await constResp.json();
+              const regionResp = await fetch(`https://esi.evetech.net/latest/universe/regions/${constData.region_id}/`);
+              if (regionResp.ok) {
+                const regionData = await regionResp.json();
+                regionName = regionData.name;
+              }
+            }
+          } catch (err) {
+            console.warn('Failed to fetch region name:', err.message);
+          }
+          console.log(`Sending eve-location-update event with region: ${regionName}`);
+          send('eve-location-update', { accountId, characterId, characterName, systemId, systemName, regionName });
+        } else {
+          console.error(`Failed to fetch system ${systemId}:`, systemResp.status);
+        }
+      } else {
+        console.error('Failed to fetch character location:', locResp.status, locResp.statusText);
+      }
+    } catch (err) {
+      console.error('Failed to fetch character location:', err);
+    }
+  }
+
+  return { success: true, characterId, characterName };
+});
+
+ipcMain.handle('eve-unlink-character', async (e, { accountId, characterId }) => {
+  const eveTokens = store.get('eveTokens', {});
+  delete eveTokens[characterId];
+  store.set('eveTokens', eveTokens);
+
+  const accounts = store.get('accounts', []);
+  const account = accounts.find(a => a.id === accountId);
+  if (account?.eveCharacters) {
+    account.eveCharacters = account.eveCharacters.filter(c => c.characterId !== characterId);
+    store.set('accounts', accounts);
+  }
+  return { success: true };
+});
+
+ipcMain.handle('eve-get-characters', async (e, { accountId }) => {
+  const accounts = store.get('accounts', []);
+  const account = accounts.find(a => a.id === accountId);
+  return account?.eveCharacters || [];
+});
+
+
+ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
+  try {
+    console.log(`eve-load-region-map: loading region for system ${systemId}`);
+
+    const esi = 'https://esi.evetech.net/latest';
+
+    // Get system info to find its region
+    const systemResp = await fetch(`${esi}/universe/systems/${systemId}/`);
+    console.log(`System response status: ${systemResp.status}`);
+    if (!systemResp.ok) {
+      console.error(`Failed to fetch system ${systemId}: ${systemResp.status}`);
+      return null;
+    }
+    const system = await systemResp.json();
+    const constellationId = system.constellation_id;
+    console.log(`System ${systemId} is in constellation ${constellationId}`);
+
+    // Get constellation to find region
+    const constResp = await fetch(`${esi}/universe/constellations/${constellationId}/`);
+    if (!constResp.ok) {
+      console.error(`Failed to fetch constellation ${constellationId}: ${constResp.status}`);
+      return null;
+    }
+    const constellation = await constResp.json();
+    const regionId = constellation.region_id;
+    console.log(`Constellation is in region ${regionId}`);
+
+    // Get region info and all systems in this region
+    const regionResp = await fetch(`${esi}/universe/regions/${regionId}/`);
+    console.log(`Region response status: ${regionResp.status}`);
+    if (!regionResp.ok) {
+      console.error(`Failed to fetch region ${regionId}: ${regionResp.status}`);
+      return null;
+    }
+    const apiRegionData = await regionResp.json();
+    // Region contains constellations array, we need to get systems from each constellation
+    const constellationIds = apiRegionData.constellations || [];
+    console.log(`Region has ${constellationIds.length} constellations`);
+
+    const systemIds = [];
+    for (const constId of constellationIds) {
+      try {
+        const cResp = await fetch(`${esi}/universe/constellations/${constId}/`);
+        if (cResp.ok) {
+          const cData = await cResp.json();
+          systemIds.push(...(cData.systems || []));
+        }
+      } catch (err) {
+        console.warn(`Failed to fetch constellation ${constId}:`, err.message);
+      }
+    }
+    console.log(`Region has ${systemIds.length} systems`);
+
+    // Fetch all system details
+    const systems = [];
+    const systemDetails = {};
+
+    for (const sysId of systemIds) {
+      try {
+        const resp = await fetch(`${esi}/universe/systems/${sysId}/`);
+        if (!resp.ok) continue;
+        const sys = await resp.json();
+        systems.push({
+          id: sysId,
+          name: sys.name,
+          x: sys.position?.x || 0,
+          y: sys.position?.y || 0,
+          z: sys.position?.z || 0,
+          security: sys.security_status || 0
+        });
+        systemDetails[sysId] = sys;
+      } catch (err) {
+        console.error(`Failed to fetch system ${sysId}:`, err.message);
+      }
+    }
+
+    // Build connections: systems connected by stargates
+    const connections = [];
+    const connectionSet = new Set();
+
+    for (const sys of systems) {
+      const sysData = systemDetails[sys.id];
+      if (sysData?.stargates) {
+        for (const gate of sysData.stargates) {
+          try {
+            const gateResp = await fetch(`${esi}/universe/stargates/${gate}/`);
+            if (gateResp.ok) {
+              const gateData = await gateResp.json();
+              const destSystemId = gateData.destination?.system_id;
+              if (destSystemId && systemIds.includes(destSystemId)) {
+                const pair = [Math.min(sys.id, destSystemId), Math.max(sys.id, destSystemId)].join(',');
+                if (!connectionSet.has(pair)) {
+                  connectionSet.add(pair);
+                  connections.push([sys.id, destSystemId]);
+                }
+              }
+            }
+          } catch (err) {
+            // Ignore individual gate fetch errors
+          }
+        }
+      }
+    }
+
+    return {
+      regionName: apiRegionData.name,
+      regionId,
+      currentSystemId: systemId,
+      systems,
+      connections
+    };
+  } catch (err) {
+    console.error('eve-load-region-map error:', err);
+    return null;
+  }
+});
+
+// ─────────────────────────────────────────────
 //  Message Archive Management (MAM)
 // ─────────────────────────────────────────────
 ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 50 }) => {
@@ -1033,6 +1591,7 @@ app.whenReady().then(async () => {
   cleanupLegacyElectronShortcut();
   createWindow();
   createTray();
+  startEveLocationPolling();  // Start polling EVE character locations
 
   // Check for updates 10 seconds after app starts
   setTimeout(async () => {
@@ -1053,6 +1612,7 @@ app.on('window-all-closed', () => { /* stay in tray */ });
 app.on('activate', () => mainWindow.show());
 
 app.on('before-quit', async (e) => {
+  stopEveLocationPolling();
   // Disconnect all XMPP connections
   for (const id in connections) {
     try {

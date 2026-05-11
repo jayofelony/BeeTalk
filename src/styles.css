@@ -432,6 +432,85 @@ html, body {
   min-width: 0;
 }
 
+/* ── Chat section (top 50%) ── */
+#chat-section {
+  flex: 1 1 50%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ── EVE map panel (bottom 50%) ── */
+#eve-map-panel {
+  flex: 1 1 50%;
+  display: none;
+  flex-direction: column;
+  min-height: 0;
+  border-top: 2px solid var(--border-mid);
+  background: var(--bg0);
+}
+#eve-map-panel.visible {
+  display: flex;
+}
+#eve-map-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg1);
+  flex-shrink: 0;
+  height: 34px;
+}
+#eve-map-location {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#eve-char-selector {
+  background: var(--bg2);
+  color: var(--text1);
+  border: 1px solid var(--border-mid);
+  border-radius: var(--radius);
+  font-size: 12px;
+  padding: 3px 6px;
+  cursor: pointer;
+  max-width: 180px;
+}
+#eve-char-selector:focus { outline: none; border-color: var(--accent); }
+#eve-map-canvas-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+  background: #080810;
+}
+#eve-map-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  height: 100%;
+  cursor: grab;
+  display: block;
+}
+#eve-map-canvas:active { cursor: grabbing; }
+#eve-map-loading {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text3);
+  font-size: 13px;
+  pointer-events: none;
+  display: none;
+  font-weight: 500;
+}
+#eve-map-loading.visible { display: block; }
+
 /* ── Welcome screen ── */
 #welcome-screen {
   flex: 1;

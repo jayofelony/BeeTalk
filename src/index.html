@@ -79,39 +79,56 @@
     </div>
   </div>
 
-  <!-- Right panel: chat area -->
+  <!-- Right panel: chat area + EVE map -->
   <div id="right-panel">
-    <div id="welcome-screen">
-      <div id="welcome-inner">
-        <div id="welcome-logo">&#9656;</div>
-        <h2>BeeTalk</h2>
-        <p>Select a contact or room to start chatting, or add an account to connect.</p>
-        <button id="btn-welcome-add">Add an account</button>
+
+    <!-- Top 50%: chat -->
+    <div id="chat-section">
+      <div id="welcome-screen">
+        <div id="welcome-inner">
+          <div id="welcome-logo">&#9656;</div>
+          <h2>BeeTalk</h2>
+          <p>Select a contact or room to start chatting, or add an account to connect.</p>
+          <button id="btn-welcome-add">Add an account</button>
+        </div>
+      </div>
+
+      <div id="chat-area" style="display:none;">
+        <div id="chat-header">
+          <div id="chat-header-avatar" class="avatar">?</div>
+          <div id="chat-header-info">
+            <div id="chat-header-name">—</div>
+            <div id="chat-header-sub"></div>
+          </div>
+          <div id="chat-header-actions">
+            <button class="icon-btn" id="btn-chat-info" title="Info">&#9432;</button>
+          </div>
+        </div>
+
+        <div id="messages-area"></div>
+
+        <div id="input-row">
+          <div id="input-wrap">
+            <textarea id="msg-input" placeholder="Write a message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+          </div>
+          <button id="btn-emoticon" title="Add emoticon">😊</button>
+          <button id="btn-send">Send</button>
+        </div>
       </div>
     </div>
 
-    <div id="chat-area" style="display:none;">
-      <div id="chat-header">
-        <div id="chat-header-avatar" class="avatar">?</div>
-        <div id="chat-header-info">
-          <div id="chat-header-name">—</div>
-          <div id="chat-header-sub"></div>
-        </div>
-        <div id="chat-header-actions">
-          <button class="icon-btn" id="btn-chat-info" title="Info">&#9432;</button>
-        </div>
+    <!-- Bottom 50%: EVE map -->
+    <div id="eve-map-panel">
+      <div id="eve-map-header">
+        <div id="eve-map-location">No EVE character linked</div>
+        <select id="eve-char-selector" title="Select character to track"></select>
       </div>
-
-      <div id="messages-area"></div>
-
-      <div id="input-row">
-        <div id="input-wrap">
-          <textarea id="msg-input" placeholder="Write a message… (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
-        </div>
-        <button id="btn-emoticon" title="Add emoticon">😊</button>
-        <button id="btn-send">Send</button>
+      <div id="eve-map-canvas-wrap">
+        <canvas id="eve-map-canvas"></canvas>
+        <div id="eve-map-loading">Loading region data…</div>
       </div>
     </div>
+
   </div>
 </div>
 

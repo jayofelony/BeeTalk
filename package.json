@@ -30,7 +30,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico"
@@ -87,7 +89,8 @@
   },
   "dependencies": {
     "@xmpp/client": "^0.13.0",
-    "electron-store": "^8.1.0"
+    "electron-store": "^8.1.0",
+    "pickler": "^0.0.5"
   },
   "overrides": {
     "file-type": "^22.0.0"
