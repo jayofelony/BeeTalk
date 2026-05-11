@@ -2,12 +2,9 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell } = require
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
-const fs = require('fs');
-const os = require('os');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
 const keytar = require('keytar');
-const Pickler = require('pickler');
 
 const store = new Store();
 const KEYTAR_SERVICE = 'BeeTalk';
@@ -34,96 +31,8 @@ const reconnectTimers = {}; // accountId -> timer handle
 app.setName('BeeTalk');
 
 // ─────────────────────────────────────────────
-//  EVE Cache Reading
+//  EVE Character Location Polling
 // ─────────────────────────────────────────────
-function findEveCacheDir() {
-  const appDataPath = path.join(os.homedir(), 'AppData', 'Local', 'CCP', 'EVE');
-
-  // Try both Tranquility and Singularity servers
-  const possibleDirs = [
-    path.join(appDataPath, 'c_ccp_eve_tq_tranquility', 'cache'),
-    path.join(appDataPath, 'c_ccp_eve_tq_tranquility', 'cache'),
-    path.join(appDataPath, 'c_ccp_eve_sisi_singularity', 'cache'),
-  ];
-
-  for (const dir of possibleDirs) {
-    if (fs.existsSync(dir)) {
-      return dir;
-    }
-  }
-
-  return null;
-}
-
-function getEveMachoNetPath(cacheDir) {
-  const machoDir = path.join(cacheDir, 'MachoNet');
-  if (!fs.existsSync(machoDir)) return null;
-
-  // Find first server directory (IP address)
-  const servers = fs.readdirSync(machoDir);
-  if (servers.length === 0) return null;
-
-  return path.join(machoDir, servers[0], '496', 'CachedObjects');
-}
-
-async function readEveLocationFromCache(characterId) {
-  try {
-    const cacheDir = findEveCacheDir();
-    if (!cacheDir) return null;
-
-    const objectsDir = getEveMachoNetPath(cacheDir);
-    if (!objectsDir) return null;
-
-    // Try to find and read cached location data
-    // EVE stores location info in various cache objects
-    // We'll look for character-related cache files
-    const cacheFiles = fs.readdirSync(objectsDir).filter(f => f.endsWith('.cache'));
-
-    for (const file of cacheFiles.slice(0, 50)) {
-      try {
-        const filePath = path.join(objectsDir, file);
-        const fileData = fs.readFileSync(filePath);
-
-        // Attempt to parse as pickle
-        // Note: this is experimental and may not work for all EVE cache formats
-        // If parsing fails, we fall back to ESI
-        if (fileData.length > 0) {
-          // Check for common pickle opcodes
-          if (fileData[0] === 0x80 || fileData[0] === 0x63) {  // pickle protocol markers
-            try {
-              const unpickler = new Pickler.Unpickler(fileData);
-              const data = unpickler.load();
-
-              // If we find character-related data with location, return it
-              if (data && typeof data === 'object') {
-                // Look for character location in the data structure
-                // This is fragile and depends on EVE's internal structure
-                if (data.solarSystemID || data.systemId || data.solarsystemid) {
-                  return {
-                    systemId: data.solarSystemID || data.systemId || data.solarsystemid,
-                    source: 'cache'
-                  };
-                }
-              }
-            } catch (err) {
-              // Pickle parse error, try next file
-              continue;
-            }
-          }
-        }
-      } catch (err) {
-        // File read error, try next file
-        continue;
-      }
-    }
-  } catch (err) {
-    console.error('Error reading EVE cache:', err.message);
-  }
-
-  return null;
-}
-
-// EVE character location polling
 let eveLocationPollTimer = null;
 async function fetchEveLocations() {
   const eveTokens = store.get('eveTokens', {});
@@ -137,48 +46,37 @@ async function fetchEveLocations() {
     if (!character) continue;
 
     try {
-      let systemId = null;
+      const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
+        headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
+      });
+      if (!locResp.ok) continue;
 
-      // Try cache first (instant if EVE is running)
-      const cacheResult = await readEveLocationFromCache(characterId);
-      if (cacheResult) {
-        systemId = cacheResult.systemId;
-        console.log(`Character ${characterId} location from cache: ${systemId}`);
-      } else {
-        // Fall back to ESI API
-        const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
-          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
-        });
-        if (locResp.ok) {
-          const locData = await locResp.json();
-          systemId = locData.solar_system_id;
-          console.log(`Character ${characterId} location from ESI: ${systemId}`);
-        }
-      }
+      const locData = await locResp.json();
+      const systemId = locData.solar_system_id;
 
-      if (systemId) {
-        // Get system details
-        const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
-        if (systemResp.ok) {
-          const systemData = await systemResp.json();
-          const systemName = systemData.name;
-          let regionName = '';
-          try {
-            const constResp = await fetch(`https://esi.evetech.net/latest/universe/constellations/${systemData.constellation_id}/`);
-            if (constResp.ok) {
-              const constData = await constResp.json();
-              const regionResp = await fetch(`https://esi.evetech.net/latest/universe/regions/${constData.region_id}/`);
-              if (regionResp.ok) {
-                const regionData = await regionResp.json();
-                regionName = regionData.name;
-              }
-            }
-          } catch (err) {
-            // ignore
+      // Get system details
+      const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
+      if (!systemResp.ok) continue;
+
+      const systemData = await systemResp.json();
+      const systemName = systemData.name;
+      let regionName = '';
+
+      try {
+        const constResp = await fetch(`https://esi.evetech.net/latest/universe/constellations/${systemData.constellation_id}/`);
+        if (constResp.ok) {
+          const constData = await constResp.json();
+          const regionResp = await fetch(`https://esi.evetech.net/latest/universe/regions/${constData.region_id}/`);
+          if (regionResp.ok) {
+            const regionData = await regionResp.json();
+            regionName = regionData.name;
           }
-          send('eve-location-update', { accountId: account.id, characterId: Number(characterId), characterName: character.characterName, systemId, systemName, regionName });
         }
+      } catch (err) {
+        // ignore region lookup errors
       }
+
+      send('eve-location-update', { accountId: account.id, characterId: Number(characterId), characterName: character.characterName, systemId, systemName, regionName });
     } catch (err) {
       // ignore polling errors
     }
@@ -187,7 +85,7 @@ async function fetchEveLocations() {
 function startEveLocationPolling() {
   if (eveLocationPollTimer) return;
   fetchEveLocations();  // Fetch immediately
-  eveLocationPollTimer = setInterval(fetchEveLocations, 5000);  // Poll every 5 seconds (cache reads are instant)
+  eveLocationPollTimer = setInterval(fetchEveLocations, 10000);  // Poll every 10 seconds
 }
 function stopEveLocationPolling() {
   if (eveLocationPollTimer) {

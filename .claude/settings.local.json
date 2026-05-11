@@ -3,7 +3,8 @@
     "allow": [
       "WebFetch(domain:github.com)",
       "Bash(npm install *)",
-      "PowerShell(Test-Path *)"
+      "PowerShell(Test-Path *)",
+      "WebFetch(domain:riftforeve.online)"
     ]
   }
 }

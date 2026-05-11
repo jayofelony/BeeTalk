@@ -89,8 +89,7 @@
   },
   "dependencies": {
     "@xmpp/client": "^0.13.0",
-    "electron-store": "^8.1.0",
-    "pickler": "^0.0.5"
+    "electron-store": "^8.1.0"
   },
   "overrides": {
     "file-type": "^22.0.0"

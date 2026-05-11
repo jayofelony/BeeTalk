@@ -116,15 +116,12 @@ The app can link EVE Online characters to XMPP accounts via OAuth2. When a chara
 - `updateEveMapPanelVisibility()` — Shows/hides EVE map panel based on linked characters
 
 **Character Location Polling** (`fetchEveLocations()` in `src/main.js`):
-- Polls every 5 seconds for character location updates
-- **Primary source: EVE cache** — If EVE client is running, reads local cache files instantly
-  - Cache path: `C:\Users\{username}\AppData\Local\CCP\EVE\c_ccp_eve_tq_tranquility\cache\`
-  - Uses `pickler` npm package to parse cPickle format cache files
-  - Instant updates when character jumps (no API latency)
-- **Fallback: ESI API** — If EVE cache unavailable, queries ESI API
-  - Uses OAuth tokens stored in `electron-store`
-  - Provides character location when EVE client is closed
+- Polls every 10 seconds for character location updates via ESI API
+- Uses OAuth tokens stored in `electron-store` to authenticate requests
+- Queries `https://esi.evetech.net/latest/characters/{id}/location/`
+- Also fetches system and region data to provide location context
 - Updates renderer via `eve-location-update` IPC event with `{ systemId, systemName, regionName }`
+- **Note:** EVE cache parsing was explored but determined impractical (CCP uses proprietary binary format requiring reverse-engineering)
 
 **EVE Data Flow**:
 1. Main process polls EVE cache or ESI every 5 seconds
@@ -213,7 +210,6 @@ Light/dark theme is controlled by a CSS class on `<body>`. The theme choice is p
 - MUC (Multi-User Chat) room join flow requires sending presence after joining; this is handled in main.js
 - Message Archive Management (MAM) queries for history happen on room join; they're paginated to avoid overload
 - **EVE OAuth**: Requires `EVE_CLIENT_ID` set in `src/main.js` (get from https://developers.eveonline.com/applications). Callback URL must be registered as `http://localhost:7777/callback`
-- **EVE Cache Reading**: Uses `pickler` npm package to parse cPickle format from EVE client cache. Provides instant location updates when EVE is running. Gracefully falls back to ESI API if cache unavailable (when EVE is closed or cache not found).
-- **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). System coordinates and connections pulled from ESI. Map data cached client-side after initial load.
-- **EVE Token Storage**: Uses `electron-store` not keytar (keytar has size limits for large tokens). Tokens include expiry; refresh flow not yet implemented (tokens assumed valid for session duration)
-- **EVE Character Location**: Polls every 5 seconds. Tries local cache first (instant if EVE running), falls back to ESI API. Supports both Tranquility (main server) and Singularity (test server) cache directories.
+- **EVE Character Location**: Polled every 10 seconds via ESI API. Uses OAuth tokens for authentication. Official, reliable, no external dependencies.
+- **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). System coordinates and stargate connections pulled on demand. No local caching of map data.
+- **EVE Token Storage**: Uses `electron-store` not keytar (keytar has size limits for large tokens). Tokens include expiry; refresh flow not yet implemented (tokens assumed valid for session duration).
