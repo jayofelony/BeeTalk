@@ -121,7 +121,6 @@ html, body {
   flex-direction: column;
   gap: 8px;
   align-items: center;
-  flex: 1;
 }
 .acct-btn {
   width: 36px;
@@ -783,6 +782,10 @@ img[src$=".gif"] {
   min-width: 360px;
   max-width: 460px;
   width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
 }
 .modal-title {
   font-size: 16px;
@@ -816,7 +819,10 @@ img[src$=".gif"] {
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-  margin-top: 20px;
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
 }
 .btn-primary {
   padding: 8px 18px;

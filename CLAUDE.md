@@ -216,3 +216,83 @@ Light/dark theme is controlled by a CSS class on `<body>`. The theme choice is p
 - **EVE Character Location**: Polled every 10 seconds via ESI API. Uses OAuth tokens for authentication. Official, reliable, no external dependencies.
 - **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). System coordinates and stargate connections pulled on demand. No local caching of map data.
 - **EVE Token Storage**: Uses `electron-store` not keytar (keytar has size limits for large tokens). Tokens include expiry; refresh flow not yet implemented (tokens assumed valid for session duration).
+- **EVE Map Neighboring Systems Positioning**: Both the small map and fullscreen map must call `positionNeighboringSystemsOnMap()` / `eveMapPositionNeighboringSystems()` to reposition neighboring systems along connection lines for visual clarity. Both maps use the same system objects from `eveMap.systemIndex` for consistent positioning. Both maps fetch neighboring region connections explicitly and store them in their respective map objects (`eveMap.neighboringRegionConnections` and `fullscreenEveMap.neighboringRegionConnections`). The fullscreen map also updates the small map's connections to ensure consistency across map switches.
+- **EVE Intel Channel Parser**: Reads local EVE chat log files to extract intel reports. Auto-detects EVE log folder at standard locations (`%APPDATA%\CCP\EVE\`, `%LOCALAPPDATA%\CCP\EVE\`, or custom OneDrive paths). Parses messages like "PlayerName SystemName Ship" to extract threats and display on maps with color-coded age. Handles "+1"/"+N" increments, "clear" messages, and ship type detection. Intel markers appear on both small and fullscreen maps with 15-minute default timeout (configurable in settings).
+
+## EVE Online API & ESI Reference
+
+**ESI (EVE Swagger Interface)** is CCP's official RESTful API for EVE Online third-party development. 
+
+**Official Resources**:
+- API Explorer: https://developers.eveonline.com/api-explorer (interactive endpoint tester)
+- ESI Docs: https://developers.eveonline.com/docs/services/esi/overview/ (full documentation)
+- Base URL: `https://esi.evetech.net/latest/`
+- Issues/Feature Requests: https://github.com/esi/esi-issues
+
+### Authentication & Versioning
+
+**SSO Authentication**: Many endpoints require OAuth2 tokens from EVE's SSO (Single Sign-On). Public endpoints don't require authentication.
+
+**API Versioning**: Use `X-Compatibility-Date` header (ISO format: YYYY-MM-DD) to pin API behavior to a specific date. Changes roll out at 11:00 UTC daily.
+
+**Breaking vs Non-Breaking**:
+- **Requires new compat date**: New routes, required parameter changes, type changes, field removals
+- **Same compat date**: New optional parameters, new response fields, new headers
+
+Report issues at the esi-issues GitHub repository.
+
+### Character Location & Navigation
+
+- **GET `/characters/{id}/location/`** — Current system, station, and structure for a character (requires auth)
+  - Returns: `solar_system_id`, `station_id`, `structure_id`
+  - Used by: `fetchEveLocations()` in main.js (polled every 10 seconds)
+  - Auth: Character OAuth token required
+  - Rate limit: 1 request/second per character
+
+- **GET `/universe/systems/{id}/`** — System metadata: name, security, coords, constellation
+  - Returns: `name`, `security_status`, `sun_id`, `position: {x, y, z}`, `constellation_id`
+  - Used for: Populating system names and security in map
+  - Auth: Public (no token required)
+
+- **GET `/universe/regions/{id}/`** — Region metadata: name, description
+  - Returns: `name`, `region_id`, `constellations[]`
+  - Used for: Displaying region names on map labels
+  - Auth: Public
+
+- **GET `/universe/stargates/{id}/`** — Stargate metadata: destination system/stargate
+  - Returns: `name`, `position: {x, y, z}`, `destination: {stargate_id, system_id}`
+  - Used for: Building stargate connection graph (embedded in SDE)
+  - Auth: Public
+
+### Static Data Export (SDE)
+
+EVE's universe structure is pre-loaded from CCP's Static Data Export (JSONL files in `assets/eve-sde/`):
+- `mapSolarSystems.jsonl` — All systems: id, name, position (x, y), region_id, security
+- `mapRegions.jsonl` — All regions: id, name
+- `mapStargates.jsonl` — All stargates: id, position, destination stargate/system
+
+SDE data is authoritative for map rendering (no API calls needed). ESI is only called for:
+- Character location polling
+- System/region lookups when needed for context
+- OAuth token exchange for character linking
+
+### OAuth2 Flow (Character Linking)
+
+EVE uses OAuth2 with PKCE (Proof Key for Code Exchange):
+1. Generate `code_verifier` (43-128 chars) and `code_challenge` (SHA256 hash, base64url)
+2. Redirect to `https://login.eveonline.com/v2/oauth/authorize/?client_id={EVE_CLIENT_ID}&redirect_uri={callback}&response_type=code&code_challenge={challenge}&scope={scopes}`
+3. User logs in, grants permission
+4. Browser redirects to `http://localhost:7777/callback?code={auth_code}`
+5. Exchange code for tokens via `POST /oauth/token` with `code_verifier` in body
+6. Receive: `access_token` (expires ~20 min), `refresh_token` (1 month), `expires_in`
+7. Store in `electron-store` under `eveTokens[characterId]`
+
+**Scopes used**: `esi-location.read.v1` (location), `esi-characters.read_standings.v1` (optional)
+
+### Common Pitfalls
+
+- **Token Expiry**: Access tokens expire after ~1200 seconds. Implement refresh flow to request new token with `refresh_token` (not yet implemented; currently tokens assumed valid for session duration)
+- **Rate Limits**: ESI enforces per-endpoint rate limits (typically 1-100 req/s). Stagger requests, implement backoff
+- **CORS**: Browser-side requests to ESI may fail due to CORS. Use main process (Node.js) for API calls instead
+- **Caching**: Leverage SDE for static data; only query ESI for dynamic data (character location, orders, etc.)
+- **Error Handling**: ESI returns 400/401/403/404/420/500/503. Implement exponential backoff for 503 (service unavailable)

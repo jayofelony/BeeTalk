@@ -49,12 +49,11 @@ const state = {
   search: '',
   appIsFocused: true, // track whether app window is focused
   idleTimer: null,
-  userIsIdle: false
+  userIsIdle: false,
+  chatInfoModalOpen: false, // track if chat info modal is currently open
+  chatInfoModalKey: null    // track which chat the modal is showing info for
 };
 
-// EVE location state: characterId -> { systemId, systemName, regionName, characterName, accountId }
-const eveLocationState = {};
-let eveTrackedCharacterId = null;  // which character the map is currently showing
 
 // ─────────────────────────────────────────────
 //  DOM refs
@@ -116,6 +115,16 @@ function esc(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+function escapeAndLinkify(s) {
+  const escaped = esc(s);
+  const urlRegex = /(https?:\/\/[^\s<>"]+)/g;
+  return escaped.replace(urlRegex, (url) => {
+    return `<a href="#" onclick="openLink('${esc(url)}'); return false;" style="color: var(--accent); text-decoration: underline; cursor: pointer;">${esc(url)}</a>`;
+  });
+}
+function openLink(url) {
+  ipcRenderer.send('open-link', url);
+}
 function chatKey(accountId, jid) { return accountId + '::' + jid; }
 function bareJid(jid) { return jid ? jid.split('/')[0] : ''; }
 // Safe modal: expects pre-escaped HTML content from caller
@@ -130,6 +139,8 @@ function showModal(html) {
 function hideModal() {
   modalOverlay.classList.add('hidden');
   modalContent.innerHTML = '';
+  state.chatInfoModalOpen = false;
+  state.chatInfoModalKey = null;
 }
 window.hideModal = hideModal;
 
@@ -293,1160 +304,28 @@ ipcRenderer.on('xmpp-roster', (e, { accountId, contacts }) => {
   if (state.activeAccountId === accountId) renderLeftPanel();
 });
 
-ipcRenderer.on('eve-character-linked', (e, { accountId, characterId, characterName }) => {
-  const acct = state.accounts.find(a => a.id === accountId);
-  if (acct) {
-    if (!acct.eveCharacters) acct.eveCharacters = [];
-    if (!acct.eveCharacters.find(c => c.characterId === characterId)) {
-      acct.eveCharacters.push({ characterId, characterName });
-    }
+ipcRenderer.on('xmpp-room-subject', (e, { accountId, roomJid, subject }) => {
+  const key = chatKey(accountId, roomJid);
+  // Create chat if it doesn't exist yet (subject might arrive before room join)
+  if (!state.chats[key]) {
+    ensureChat(key, { type: 'room', name: roomJid.split('@')[0], jid: roomJid, accountId });
   }
-  updateEveMapPanelVisibility();
-});
+  state.chats[key].motd = subject || '';
+  console.log(`[Renderer] Room subject stored for ${roomJid}: "${subject}"`);
+  saveChatState(key);  // Persist subject
 
-ipcRenderer.on('eve-location-update', (e, { accountId, characterId, characterName, systemId, systemName, regionName }) => {
-  eveLocationState[characterId] = { accountId, characterId, characterName, systemId, systemName, regionName };
-  eveTrackedCharacterId = characterId;  // Most recently updated character
-  localStorage.setItem('lastEveSystem', systemId);
-  renderEveMapPanel();
-  if (eveMap.canvas) {
-    eveMap.focusSystemId = systemId;
-    // Preserve autopilot destination when reloading region
-    const savedDest = fullscreenEveMap.autopilotDestination;
-    const savedTimer = fullscreenEveMap.waypointClearTimer;
-    eveMapLoadRegion(systemId);
-    fullscreenEveMap.autopilotDestination = savedDest;
-    fullscreenEveMap.waypointClearTimer = savedTimer;
+  // Add system message in room when subject changes
+  if (subject) {
+    addSystemMsg(key, accountId, `📌 Topic: ${subject}`);
+  } else {
+    addSystemMsg(key, accountId, `📌 Topic cleared`);
+  }
+
+  // Update info modal if it's open for this room
+  if (state.chatInfoModalOpen && state.chatInfoModalKey === key) {
+    updateChatInfoModalSubject();
   }
 });
-
-// ─────────────────────────────────────────────
-//  EVE Map Canvas Renderer
-// ─────────────────────────────────────────────
-const eveMap = {
-  canvas: null, ctx: null, data: null, systemIndex: {}, animFrame: null,
-  transform: { scale: 1, offsetX: 0, offsetY: 0 }, fitScale: 1,
-  dragging: false, dragOrigin: { x: 0, y: 0 }, hovered: null,
-  focusSystemId: null, pulsePhase: 0, loadingRegionId: null,
-  characterMarkers: {},  // systemId -> [{ characterId, characterName }, ...]
-  showJumpBridges: true
-};
-
-function eveGetTheme() {
-  return document.documentElement.getAttribute('data-theme') || 'dark';
-}
-
-// RIFT-compatible security status colors (11-tier scale)
-function eveSecColor(sec) {
-  const roundedSec = Math.round(sec * 10) / 10;  // Round to nearest 0.1
-  if (roundedSec >= 1.0) return '#2E74DF';   // Deep blue (1.0+)
-  if (roundedSec >= 0.9) return '#379CF6';   // Bright blue (0.9-0.99)
-  if (roundedSec >= 0.8) return '#4ACFF3';   // Cyan (0.8-0.89)
-  if (roundedSec >= 0.7) return '#5CDCA6';   // Teal (0.7-0.79)
-  if (roundedSec >= 0.6) return '#70E552';   // Green (0.6-0.69)
-  if (roundedSec >= 0.5) return '#EEFF83';   // Yellow-green (0.5-0.59)
-  if (roundedSec >= 0.4) return '#DC6C08';   // Orange (0.4-0.49)
-  if (roundedSec >= 0.3) return '#CE4611';   // Dark orange (0.3-0.39)
-  if (roundedSec >= 0.2) return '#BC1113';   // Dark red (0.2-0.29)
-  if (roundedSec >= 0.1) return '#6D231A';   // Deep maroon (0.1-0.19)
-  return '#8F3068';                           // Purple (0.0-0.09, null sec)
-}
-
-function eveMapToCanvas(x, y) {
-  return { cx: x * eveMap.transform.scale + eveMap.transform.offsetX, cy: -y * eveMap.transform.scale + eveMap.transform.offsetY };
-}
-
-function eveMapFitToCanvas() {
-  if (!eveMap.data?.systems || !eveMap.canvas) return;
-  const sys = eveMap.data.systems;
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  sys.forEach(s => { minX = Math.min(minX, s.x); maxX = Math.max(maxX, s.x); minY = Math.min(minY, s.y); maxY = Math.max(maxY, s.y); });
-  const pad = 50, rangeX = maxX - minX || 1, rangeY = maxY - minY || 1;
-  const scale = Math.min((eveMap.canvas.width - pad * 2) / rangeX, (eveMap.canvas.height - pad * 2) / rangeY);
-  eveMap.fitScale = scale;
-  eveMap.transform.scale = scale;
-  eveMap.transform.offsetX = pad - minX * scale + ((eveMap.canvas.width - pad * 2) - rangeX * scale) / 2;
-  eveMap.transform.offsetY = pad + maxY * scale + ((eveMap.canvas.height - pad * 2) - rangeY * scale) / 2;
-}
-
-function eveMapDraw() {
-  const { canvas, ctx, data, transform } = eveMap;
-  if (!canvas || !ctx) return;
-  const w = canvas.width, h = canvas.height;
-  const isDark = eveGetTheme() === 'dark';
-
-  ctx.fillStyle = isDark ? '#080810' : '#f5f5f7';
-  ctx.fillRect(0, 0, w, h);
-
-  if (!data) return;
-
-  eveMap.pulsePhase = (eveMap.pulsePhase + 0.04) % (Math.PI * 2);
-  const dotR = 2;
-
-  // Connections (stargates)
-  ctx.strokeStyle = isDark ? 'rgba(60, 80, 140, 0.35)' : 'rgba(150, 150, 200, 0.25)';
-  ctx.lineWidth = 0.6;
-  data.connections.forEach(([a, b]) => {
-    const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
-    if (!sa || !sb) return;
-    const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.y);
-    ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
-  });
-
-  // Jump bridges and cross-region endpoints
-  const crossRegionEndpoints = new Map(); // systemId -> { system, regionName }
-  if (eveMap.showJumpBridges && data.jumpBridges) {
-    ctx.strokeStyle = isDark ? 'rgba(255, 100, 100, 0.4)' : 'rgba(200, 50, 50, 0.3)';
-    ctx.lineWidth = 0.8;
-    ctx.setLineDash([3, 3]);
-    data.jumpBridges.forEach(([a, b]) => {
-      const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
-      if (!sa || !sb) return;
-      const pa = eveMapToCanvas(sa.x, sa.y), pb = eveMapToCanvas(sb.x, sb.y);
-      ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
-
-      // Track cross-region endpoints (systems not in current region)
-      const inCurrentRegion = data.systems.some(sys => sys.id === a);
-      if (!inCurrentRegion && sa && sa.regionName) {
-        crossRegionEndpoints.set(a, { system: sa, regionName: sa.regionName });
-      }
-      const inCurrentRegionB = data.systems.some(sys => sys.id === b);
-      if (!inCurrentRegionB && sb && sb.regionName) {
-        crossRegionEndpoints.set(b, { system: sb, regionName: sb.regionName });
-      }
-    });
-    ctx.setLineDash([]);
-  }
-
-  // Systems with character markers
-  eveMap.characterMarkers = {};
-  for (const [charId, loc] of Object.entries(eveLocationState)) {
-    const sys = eveMap.systemIndex[loc.systemId];
-    if (sys) {
-      if (!eveMap.characterMarkers[loc.systemId]) eveMap.characterMarkers[loc.systemId] = [];
-      eveMap.characterMarkers[loc.systemId].push({ characterId: charId, characterName: loc.characterName });
-    }
-  }
-
-  data.systems.forEach(sys => {
-    const { cx, cy } = eveMapToCanvas(sys.x, sys.y);
-    if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
-    const isFocus = sys.id === eveMap.focusSystemId;
-    const isHovered = eveMap.hovered?.id === sys.id;
-    const hasCharacters = eveMap.characterMarkers[sys.id];
-    const color = eveSecColor(sys.security);
-
-    if (isFocus || hasCharacters) {
-      const glow = dotR * 5 + (isFocus ? Math.sin(eveMap.pulsePhase) * dotR * 2 : 0);
-      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
-      grad.addColorStop(0, isFocus ? 'rgba(91,142,240,0.6)' : 'rgba(200,150,50,0.4)');
-      grad.addColorStop(1, isFocus ? 'rgba(91,142,240,0)' : 'rgba(200,150,50,0)');
-      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx, cy, glow, 0, Math.PI * 2); ctx.fill();
-    } else if (isHovered) {
-      ctx.fillStyle = 'rgba(255,255,255,0.12)'; ctx.beginPath(); ctx.arc(cx, cy, dotR * 3.5, 0, Math.PI * 2); ctx.fill();
-    }
-
-    ctx.fillStyle = isFocus ? '#5b8ef0' : hasCharacters ? '#c89632' : color;
-    ctx.beginPath(); ctx.arc(cx, cy, isFocus ? dotR * 2.5 : hasCharacters ? dotR * 1.8 : dotR, 0, Math.PI * 2); ctx.fill();
-  });
-
-  // Cross-region jump bridge endpoints
-  const crossRegionLabels = [];
-  crossRegionEndpoints.forEach(({ system: sys, regionName }) => {
-    const { cx, cy } = eveMapToCanvas(sys.x, sys.y);
-    if (cx < -30 || cx > w + 30 || cy < -30 || cy > h + 30) return;
-    const color = eveSecColor(sys.security);
-    const dimColor = isDark ? 'rgba(100,100,100,0.4)' : 'rgba(150,150,150,0.3)';
-
-    ctx.fillStyle = dimColor;
-    ctx.beginPath(); ctx.arc(cx, cy, dotR * 0.8, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(cx, cy, dotR * 0.5, 0, Math.PI * 2); ctx.fill();
-
-    crossRegionLabels.push({ cx, cy, name: sys.name, regionName });
-  });
-
-  // Cross-region endpoint labels
-  ctx.font = '10px -apple-system, Segoe UI, sans-serif';
-  ctx.fillStyle = isDark ? 'rgba(200,200,200,0.5)' : 'rgba(80,80,80,0.5)';
-  crossRegionLabels.forEach(({ cx, cy, name, regionName }) => {
-    const label = `${name} (${regionName})`;
-    const tw = ctx.measureText(label).width;
-    const lx = Math.max(5, Math.min(cx - tw / 2, w - tw - 5));
-    const ly = cy + 12;
-    ctx.fillText(label, lx, ly);
-  });
-
-  // Hover tooltip
-  if (eveMap.hovered) {
-    const { cx, cy } = eveMapToCanvas(eveMap.hovered.x, eveMap.hovered.y);
-    let label = `${eveMap.hovered.name}  ${eveMap.hovered.security.toFixed(1)}`;
-    if (eveMap.characterMarkers[eveMap.hovered.id]) {
-      label += `  [${eveMap.characterMarkers[eveMap.hovered.id].map(c => c.characterName).join(', ')}]`;
-    }
-    ctx.font = '11px -apple-system, Segoe UI, sans-serif';
-    const tw = ctx.measureText(label).width;
-    // Position tooltip 10px to the right and above the system, but keep it on screen
-    let lx = cx + 10;
-    let ly = cy - 10;
-    if (lx + tw + 10 > w) lx = cx - tw - 10;  // Move to left if off right edge
-    if (ly < 15) ly = cy + 15;  // Move below if off top edge
-    ctx.fillStyle = isDark ? 'rgba(8, 8, 18, 0.85)' : 'rgba(255, 255, 255, 0.9)';
-    ctx.fillRect(lx - 5, ly - 13, tw + 10, 18);
-    ctx.fillStyle = eveSecColor(eveMap.hovered.security); ctx.fillText(label, lx, ly);
-  }
-
-  // Region name label
-  ctx.fillStyle = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(0,0,0,0.15)';
-  ctx.font = '11px -apple-system, Segoe UI, sans-serif';
-  ctx.fillText(data.regionName || '', 10, 16);
-}
-
-function eveMapAnimate() {
-  eveMapDraw();
-  eveMap.animFrame = requestAnimationFrame(eveMapAnimate);
-}
-
-function initEveMapCanvas() {
-  eveMap.canvas = document.getElementById('eve-map-canvas');
-  if (!eveMap.canvas) return;
-  eveMap.ctx = eveMap.canvas.getContext('2d');
-  const wrap = eveMap.canvas.parentElement;
-  new ResizeObserver(() => {
-    eveMap.canvas.width = wrap.clientWidth;
-    eveMap.canvas.height = wrap.clientHeight;
-    if (eveMap.data) eveMapFitToCanvas();
-  }).observe(wrap);
-  eveMap.canvas.width = wrap.clientWidth;
-  eveMap.canvas.height = wrap.clientHeight;
-
-  eveMap.canvas.addEventListener('mousedown', e => {
-    eveMap.dragging = true;
-    eveMap.dragOrigin = { x: e.clientX - eveMap.transform.offsetX, y: e.clientY - eveMap.transform.offsetY };
-  });
-  window.addEventListener('mouseup', () => { eveMap.dragging = false; });
-  eveMap.canvas.addEventListener('mousemove', e => {
-    const rect = eveMap.canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    if (eveMap.dragging) {
-      eveMap.transform.offsetX = e.clientX - eveMap.dragOrigin.x;
-      eveMap.transform.offsetY = e.clientY - eveMap.dragOrigin.y;
-      return;
-    }
-    if (!eveMap.data) return;
-    let best = null, bestD = 12;
-    eveMap.data.systems.forEach(sys => {
-      const { cx, cy } = eveMapToCanvas(sys.x, sys.y);
-      const d = Math.hypot(cx - mx, cy - my);
-      if (d < bestD) { best = sys; bestD = d; }
-    });
-    eveMap.hovered = best;
-  });
-  eveMap.canvas.addEventListener('mouseleave', () => { eveMap.hovered = null; eveMap.dragging = false; });
-  eveMap.canvas.addEventListener('wheel', e => {
-    e.preventDefault();
-    const rect = eveMap.canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const f = e.deltaY > 0 ? 0.85 : 1.18;
-    eveMap.transform.offsetX = mx + (eveMap.transform.offsetX - mx) * f;
-    eveMap.transform.offsetY = my + (eveMap.transform.offsetY - my) * f;
-    eveMap.transform.scale *= f;
-  }, { passive: false });
-
-  if (eveMap.animFrame) cancelAnimationFrame(eveMap.animFrame);
-  eveMapAnimate();
-}
-
-async function eveMapLoadRegion(systemId) {
-  if (!systemId) return;
-  // Only show loading on first load, not on updates
-  const isFirstLoad = !eveMap.data;
-  const loadingEl = document.getElementById('eve-map-loading');
-  if (isFirstLoad) loadingEl?.classList.add('visible');
-
-  const data = await ipcRenderer.invoke('eve-load-region-map', { systemId });
-  if (isFirstLoad) loadingEl?.classList.remove('visible');
-  if (!data) return;
-
-  eveMap.data = data;
-  // Preserve neighboring systems when resetting systemIndex
-  const savedNeighbors = {};
-  Object.keys(eveMap.systemIndex).forEach(id => {
-    if (fullscreenEveMap.neighboringSystems?.[id]) {
-      savedNeighbors[id] = eveMap.systemIndex[id];
-    }
-  });
-  eveMap.systemIndex = {};
-  data.systems.forEach(s => { eveMap.systemIndex[s.id] = s; });
-  // Restore neighboring systems
-  Object.assign(eveMap.systemIndex, savedNeighbors);
-
-  // For cross-region jump bridges, we need to fetch the destination system data
-  // Request additional system data for jump bridge endpoints from the main process
-  if (data.jumpBridges && data.jumpBridges.length > 0) {
-    const missingSystemIds = [];
-    data.jumpBridges.forEach(([a, b]) => {
-      if (!eveMap.systemIndex[a]) missingSystemIds.push(a);
-      if (!eveMap.systemIndex[b]) missingSystemIds.push(b);
-    });
-
-    if (missingSystemIds.length > 0) {
-      ipcRenderer.invoke('eve-get-systems', { systemIds: missingSystemIds }).then(systems => {
-        if (systems && systems.length > 0) {
-          systems.forEach(s => {
-            eveMap.systemIndex[s.id] = s;
-          });
-        }
-      }).catch(err => {
-        // Fail silently
-      });
-    }
-  }
-
-  // Only fit to canvas on first load, not on updates
-  if (isFirstLoad && eveMap.canvas) {
-    eveMap.canvas.width = eveMap.canvas.parentElement.clientWidth;
-    eveMap.canvas.height = eveMap.canvas.parentElement.clientHeight;
-    eveMapFitToCanvas();
-  }
-}
-
-function getAllEveCharacters() {
-  return state.accounts.flatMap(a => (a.eveCharacters || []).map(c => ({ ...c, accountId: a.id })));
-}
-
-function renderEveMapPanel() {
-  const selector = document.getElementById('eve-char-selector');
-  const locationLabel = document.getElementById('eve-map-location');
-  if (!selector || !locationLabel) return;
-
-  const chars = getAllEveCharacters();
-  selector.innerHTML = chars.length
-    ? chars.map(c => `<option value="${c.characterId}" ${Number(c.characterId) === eveTrackedCharacterId ? 'selected' : ''}>${esc(c.characterName)}</option>`).join('')
-    : '<option value="">No characters linked</option>';
-  selector.style.display = chars.length ? 'block' : 'none';
-  if (!eveTrackedCharacterId && chars.length) eveTrackedCharacterId = Number(chars[0].characterId);
-
-  const loc = eveTrackedCharacterId ? eveLocationState[eveTrackedCharacterId] : null;
-  if (loc) {
-    locationLabel.textContent = `${loc.characterName}  ·  ${loc.systemName}  (${loc.regionName || '…'})`;
-  } else if (chars.length) {
-    locationLabel.textContent = 'Fetching location…';
-  } else {
-    locationLabel.textContent = 'No EVE character linked';
-  }
-}
-
-// ─────────────────────────────────────────────
-//  Fullscreen Map View
-// ─────────────────────────────────────────────
-const fullscreenEveMap = { canvas: null, ctx: null, transform: { offsetX: 0, offsetY: 0, scale: 1 } };
-
-function showFullscreenMap() {
-  const rightPanel = $('right-panel');
-  const fsMapView = $('fullscreen-map-view');
-  const fsWalletView = $('fullscreen-wallet-view');
-  if (!rightPanel || !fsMapView) return;
-
-  // Hide wallet if open
-  if (fsWalletView) fsWalletView.style.display = 'none';
-
-  rightPanel.style.display = 'none';
-  fsMapView.style.display = 'flex';
-
-  // Initialize canvas if not done
-  if (!fullscreenEveMap.canvas) {
-    fullscreenEveMap.canvas = document.getElementById('fullscreen-eve-map-canvas');
-    fullscreenEveMap.ctx = fullscreenEveMap.canvas?.getContext('2d');
-    const wrap = fullscreenEveMap.canvas?.parentElement;
-
-    if (fullscreenEveMap.canvas && wrap) {
-      fullscreenEveMap.canvas.width = wrap.clientWidth;
-      fullscreenEveMap.canvas.height = wrap.clientHeight;
-      new ResizeObserver(() => {
-        fullscreenEveMap.canvas.width = wrap.clientWidth;
-        fullscreenEveMap.canvas.height = wrap.clientHeight;
-        fsEveMapFitToCanvas();
-      }).observe(wrap);
-
-      initFullscreenMapControls();
-    }
-  }
-
-  // Use current region data
-  if (eveMap.data) {
-    // Load neighboring systems from connected regions
-    loadNeighboringSystemsForFullscreenMap();
-    fsEveMapFitToCanvas();
-    animateFullscreenMap();
-  }
-}
-
-function loadNeighboringSystemsForFullscreenMap() {
-  if (!eveMap.data) return;
-
-  const neighboringSystemIds = new Set();
-  const currentSystemIds = new Set(eveMap.data.systems.map(s => s.id));
-  const neighboringConnections = {}; // Track which local systems connect to each neighbor
-
-  eveMap.data.connections.forEach(([a, b]) => {
-    const aInRegion = currentSystemIds.has(a);
-    const bInRegion = currentSystemIds.has(b);
-
-    if (aInRegion && !bInRegion) {
-      neighboringSystemIds.add(b);
-      if (!neighboringConnections[b]) neighboringConnections[b] = [];
-      neighboringConnections[b].push(a);
-    } else if (bInRegion && !aInRegion) {
-      neighboringSystemIds.add(a);
-      if (!neighboringConnections[a]) neighboringConnections[a] = [];
-      neighboringConnections[a].push(b);
-    }
-  });
-
-  if (neighboringSystemIds.size > 0) {
-    ipcRenderer.invoke('eve-get-systems', { systemIds: Array.from(neighboringSystemIds) }).then(systems => {
-      fullscreenEveMap.neighboringSystems = {};
-      const regionIds = new Set();
-      if (systems && systems.length > 0) {
-        systems.forEach(sys => {
-          fullscreenEveMap.neighboringSystems[sys.id] = sys;
-          eveMap.systemIndex[sys.id] = sys;  // Also add to systemIndex for pathfinding
-          if (sys.region_id) regionIds.add(sys.region_id);
-        });
-
-        // Load neighboring region connections to build chains
-        if (regionIds.size > 0) {
-          ipcRenderer.invoke('eve-get-region-connections', { regionIds: Array.from(regionIds) }).then(connections => {
-            fullscreenEveMap.neighboringRegionConnections = connections || [];
-
-            // Position neighbors along lines connecting local systems
-            positionNeighboringSystemsOnMap(neighboringConnections, connections);
-          }).catch(err => {
-            fullscreenEveMap.neighboringRegionConnections = [];
-          });
-        }
-      }
-    }).catch(err => {
-      // Silent catch
-    });
-  }
-}
-
-function positionNeighboringSystemsOnMap(neighboringConnections, regionConnections) {
-  const neighbors = fullscreenEveMap.neighboringSystems;
-  if (!neighbors || Object.keys(neighbors).length === 0) return;
-
-  // Build a graph of neighboring systems and their connections
-  const graph = {};
-  Object.keys(neighbors).forEach(id => {
-    graph[id] = [];
-  });
-
-  regionConnections.forEach(([a, b]) => {
-    if (graph[a] && graph[b]) {
-      graph[a].push(b);
-      graph[b].push(a);
-    }
-  });
-
-  // Find chains of neighboring systems and their local endpoints
-  const processed = new Set();
-  Object.keys(neighbors).forEach(startId => {
-    if (processed.has(startId)) return;
-
-    // Find the chain starting from this system
-    const chain = [startId];
-    processed.add(startId);
-
-    let current = startId;
-    while (graph[current] && graph[current].length > 0) {
-      const next = graph[current].find(id => !processed.has(id));
-      if (!next) break;
-      chain.push(next);
-      processed.add(next);
-      current = next;
-    }
-
-    // Find local system endpoints for this chain
-    const chainEndpoints = [];
-    chain.forEach(systemId => {
-      const localConnections = neighboringConnections[systemId] || [];
-      localConnections.forEach(localId => {
-        if (!chainEndpoints.includes(localId)) {
-          chainEndpoints.push(localId);
-        }
-      });
-    });
-
-    // If we have exactly 2 local endpoints, position chain along the line between them
-    if (chainEndpoints.length === 2) {
-      const sysA = eveMap.systemIndex[chainEndpoints[0]];
-      const sysB = eveMap.systemIndex[chainEndpoints[1]];
-
-      if (sysA && sysB) {
-        // Position each system in the chain along the line from sysA to sysB
-        chain.forEach((systemId, idx) => {
-          const t = (idx + 1) / (chain.length + 1); // Distribute evenly, excluding endpoints
-          const sys = neighbors[systemId];
-          if (sys) {
-            sys.x = sysA.x + (sysB.x - sysA.x) * t;
-            sys.y = sysA.y + (sysB.y - sysA.y) * t;
-          }
-        });
-      }
-    }
-  });
-}
-
-function startWaypointAutoClears() {
-  // Clear any existing timer
-  if (fullscreenEveMap.waypointClearTimer) {
-    clearTimeout(fullscreenEveMap.waypointClearTimer);
-  }
-  // Auto-clear after 30 seconds
-  fullscreenEveMap.waypointClearTimer = setTimeout(() => {
-    fullscreenEveMap.autopilotDestination = null;
-  }, 30000);
-}
-
-function hideFullscreenMap() {
-  const rightPanel = $('right-panel');
-  const fsMapView = $('fullscreen-map-view');
-  if (!rightPanel || !fsMapView) return;
-
-  // Clear waypoint timer when closing map
-  if (fullscreenEveMap.waypointClearTimer) {
-    clearTimeout(fullscreenEveMap.waypointClearTimer);
-    fullscreenEveMap.waypointClearTimer = null;
-  }
-  fullscreenEveMap.autopilotDestination = null;
-
-  fsMapView.style.display = 'none';
-  rightPanel.style.display = 'flex';
-}
-
-async function showFullscreenWallet() {
-  const rightPanel = $('right-panel');
-  const fsWalletView = $('fullscreen-wallet-view');
-  const fsMapView = $('fullscreen-map-view');
-  if (!rightPanel || !fsWalletView) return;
-
-  // Hide map if open
-  if (fsMapView) fsMapView.style.display = 'none';
-
-  rightPanel.style.display = 'none';
-  fsWalletView.style.display = 'flex';
-
-  // Fetch and display wallet data
-  await loadWalletData();
-}
-
-function hideFullscreenWallet() {
-  const rightPanel = $('right-panel');
-  const fsWalletView = $('fullscreen-wallet-view');
-  if (!rightPanel || !fsWalletView) return;
-
-  fsWalletView.style.display = 'none';
-  rightPanel.style.display = 'flex';
-}
-
-function showFullscreenMapContextMenu(system, clientX, clientY) {
-  const menu = $('context-menu');
-  if (!menu) return;
-
-  menu.innerHTML = `
-    <div style="background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 4px 12px rgba(0,0,0,0.3); min-width: 180px; z-index: 10000;">
-      <div style="padding: 8px 0;">
-        <div style="padding: 8px 16px; color: var(--text2); font-size: 11px; font-weight: 600; text-transform: uppercase; border-bottom: 1px solid var(--border);">
-          ${system.name}
-        </div>
-        <div style="padding: 4px 0;">
-          <button id="ctx-set-destination" style="width: 100%; padding: 8px 16px; text-align: left; background: none; border: none; color: var(--text1); cursor: pointer; font-size: 13px; transition: background 0.2s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='none'">
-            Set Destination
-          </button>
-          <button id="ctx-copy-name" style="width: 100%; padding: 8px 16px; text-align: left; background: none; border: none; color: var(--text1); cursor: pointer; font-size: 13px; transition: background 0.2s;" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='none'">
-            Copy System Name
-          </button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  menu.classList.remove('hidden');
-  menu.style.position = 'fixed';
-  menu.style.left = clientX + 'px';
-  menu.style.top = clientY + 'px';
-
-  $('ctx-set-destination')?.addEventListener('click', () => {
-    setDestinationInGame(system);
-    menu.classList.add('hidden');
-  });
-
-  $('ctx-copy-name')?.addEventListener('click', () => {
-    navigator.clipboard.writeText(system.name).then(() => {
-      // Show brief feedback
-      const originalText = $('ctx-copy-name').textContent;
-      $('ctx-copy-name').textContent = 'Copied!';
-      setTimeout(() => {
-        $('ctx-copy-name').textContent = originalText;
-      }, 1500);
-    });
-    menu.classList.add('hidden');
-  });
-
-  // Hide menu when clicking elsewhere
-  const hideMenu = () => {
-    menu.classList.add('hidden');
-    document.removeEventListener('click', hideMenu);
-  };
-  setTimeout(() => document.addEventListener('click', hideMenu), 100);
-}
-
-async function setDestinationInGame(system) {
-  const eveChars = getAllEveCharacters();
-  if (eveChars.length === 0) {
-    alert('No EVE characters linked');
-    return;
-  }
-
-  // Use the first character's account
-  const char = eveChars[0];
-
-  try {
-    const result = await ipcRenderer.invoke('eve-set-autopilot', {
-      characterId: char.characterId,
-      destinationId: system.id,
-      clearWaypoints: true
-    });
-
-    if (result.success) {
-      // Store the destination for highlighting on the map
-      fullscreenEveMap.autopilotDestination = system.id;
-      startWaypointAutoClears();
-
-      // Show success feedback
-      const btn = $('ctx-set-destination');
-      if (btn) {
-        const originalText = btn.textContent;
-        btn.textContent = '✓ Set!';
-        setTimeout(() => {
-          btn.textContent = originalText;
-        }, 2000);
-      }
-    } else {
-      alert(`Failed to set destination: ${result.error}`);
-    }
-  } catch (err) {
-    alert(`Error: ${err.message}`);
-  }
-}
-
-async function loadWalletData() {
-  const eveChars = getAllEveCharacters();
-  if (eveChars.length === 0) {
-    renderWalletEmpty();
-    return;
-  }
-
-  try {
-    const walletData = await ipcRenderer.invoke('eve-get-wallet', { characterIds: eveChars.map(c => c.characterId) });
-    renderWalletData(walletData, eveChars);
-  } catch (err) {
-    $('wallet-balance-section').innerHTML = `<div style="color: var(--text2); padding: 12px;">Failed to load wallet data</div>`;
-  }
-}
-
-function renderWalletEmpty() {
-  const balanceSection = $('wallet-balance-section');
-  balanceSection.innerHTML = '<div style="color: var(--text2); padding: 12px;">No EVE characters linked</div>';
-}
-
-function findRouteBetweenSystems(startId, endId, systems, connections, jumpBridges = []) {
-  if (startId === endId) return [systems.find(s => s.id === startId)];
-
-  // Build adjacency list from connections (stargates + jump bridges)
-  const graph = {};
-  const systemIds = new Set();
-  systems.forEach(sys => {
-    graph[sys.id] = [];
-    systemIds.add(sys.id);
-  });
-
-  // Add stargate connections
-  let sgCount = 0;
-  connections.forEach(([a, b]) => {
-    if (graph[a] && graph[b]) {
-      graph[a].push(b);
-      graph[b].push(a);
-      sgCount += 2;
-    }
-  });
-
-  // Add jump bridge connections
-  let jbCount = 0;
-  if (jumpBridges && jumpBridges.length > 0) {
-    jumpBridges.forEach(([a, b]) => {
-      if (graph[a] !== undefined) {
-        graph[a].push(b);
-        jbCount++;
-      }
-      if (graph[b] !== undefined) {
-        graph[b].push(a);
-        jbCount++;
-      }
-    });
-  }
-
-
-  // BFS to find shortest path
-  const queue = [[startId, [startId]]];
-  const visited = new Set([startId]);
-
-  while (queue.length > 0) {
-    const [current, path] = queue.shift();
-    if (current === endId) {
-      return path.map(id => systems.find(s => s.id === id)).filter(s => s);
-    }
-
-    const neighbors = graph[current] || [];
-    for (const neighbor of neighbors) {
-      if (!visited.has(neighbor)) {
-        visited.add(neighbor);
-        queue.push([neighbor, [...path, neighbor]]);
-      }
-    }
-  }
-
-  return null; // No route found
-}
-
-function getTransactionTypeDescription(refType) {
-  const typeMap = {
-    'agent_mission_reward': 'Agent Mission Reward',
-    'bounty_prize': 'Bounty Prize',
-    'daily_goal_reward': 'Daily Goal Reward',
-    'player_donation': 'Player Donation',
-    'mission_reward': 'Mission Reward',
-    'npc_bounty': 'NPC Bounty',
-    'player_trading': 'Player Trading',
-    'corp_war_rp': 'Crew Resource Point',
-    'insurance': 'Insurance',
-    'bounty_reimbursement': 'Bounty Reimbursement',
-    'lp_store': 'LP Store',
-    'market_escrow': 'Market Escrow',
-    'isk_sink': 'ISK Sink',
-    'structure_gate_jump': 'Structure Gate Jump',
-    'manufacture': 'Manufacturing',
-    'brokers_fee': 'Broker Fee',
-  };
-  return typeMap[refType] || refType || 'Transaction';
-}
-
-function renderWalletData(walletData, eveChars) {
-  const isDark = eveGetTheme() === 'dark';
-  const balanceSection = $('wallet-balance-section');
-  const transactionsSection = $('wallet-transactions-section');
-
-  // Render balance section
-  let balanceHtml = '<div style="margin-bottom: 12px;"><h3 style="margin-bottom: 12px; color: var(--text1);">Character Balances</h3>';
-  balanceHtml += '<div style="display: grid; gap: 8px;">';
-
-  eveChars.forEach(char => {
-    const balance = walletData.balances?.[char.characterId];
-    const formattedBalance = balance ? parseFloat(balance).toFixed(2) : '0.00';
-    balanceHtml += `
-      <div style="padding: 8px 12px; background: var(--bg2); border-radius: var(--radius); border: 1px solid var(--border);">
-        <div style="font-weight: 500; color: var(--text1);">${char.characterName}</div>
-        <div style="font-size: 13px; color: var(--text2); margin-top: 4px;">
-          <span style="color: var(--accent); font-weight: 600;">${parseFloat(formattedBalance).toLocaleString()}</span> ISK
-        </div>
-      </div>
-    `;
-  });
-
-  balanceHtml += '</div></div>';
-  balanceSection.innerHTML = balanceHtml;
-
-  // Render transactions section
-  let transHtml = '<div><h3 style="margin-bottom: 12px; color: var(--text1);">Recent Transactions</h3>';
-  transHtml += '<div style="display: grid; gap: 8px;">';
-
-  const allTransactions = [];
-  if (walletData.transactions && typeof walletData.transactions === 'object') {
-    Object.entries(walletData.transactions).forEach(([charId, transactions]) => {
-      const char = eveChars.find(c => c.characterId === parseInt(charId));
-      console.log(`Processing transactions for character ${charId}:`, transactions?.length || 0, 'transactions');
-      if (transactions && Array.isArray(transactions)) {
-        transactions.forEach((t, idx) => {
-          if (!t || !t.date) return;
-          // Accept both market transactions (quantity + unit_price) and journal entries (amount)
-          if ((t.quantity !== undefined && t.unit_price !== undefined) || t.amount !== undefined) {
-            allTransactions.push({ ...t, characterName: char?.characterName || 'Unknown' });
-          }
-        });
-      }
-    });
-  }
-
-  if (allTransactions.length > 0) {
-    // Sort by date descending and limit to 100
-    allTransactions.sort((a, b) => {
-      const dateA = new Date(a.date).getTime();
-      const dateB = new Date(b.date).getTime();
-      return dateB - dateA;
-    }).slice(0, 100).forEach(trans => {
-      let amount, description, isIncome;
-
-      // Handle market transactions (quantity + unit_price)
-      if (trans.quantity !== undefined && trans.unit_price !== undefined) {
-        amount = (trans.quantity * trans.unit_price).toFixed(2);
-        isIncome = !trans.is_buy;
-        const actionType = trans.is_buy ? 'Buy' : 'Sell';
-        const quantity = trans.quantity.toLocaleString();
-        description = `${actionType} ${quantity} items @ ${parseFloat(trans.unit_price).toFixed(2)} ISK`;
-      }
-      // Handle journal entries (amount + description)
-      else if (trans.amount !== undefined) {
-        amount = Math.abs(trans.amount).toFixed(2);
-        isIncome = trans.amount > 0;
-        description = trans.description || getTransactionTypeDescription(trans.ref_type);
-      } else {
-        return;
-      }
-
-      const color = isIncome ? 'rgba(100, 200, 100, 0.8)' : 'rgba(200, 100, 100, 0.8)';
-      const transDate = new Date(trans.date).toLocaleDateString();
-
-      transHtml += `
-        <div style="padding: 8px 12px; background: var(--bg2); border-radius: var(--radius); border: 1px solid var(--border); font-size: 12px;">
-          <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-            <span style="color: var(--text1);">${trans.characterName}</span>
-            <span style="color: ${color}; font-weight: 600;">${isIncome ? '+' : '-'}${amount}</span>
-          </div>
-          <div style="color: var(--text3); font-size: 11px;">
-            ${description} • ${transDate}
-          </div>
-        </div>
-      `;
-    });
-  } else {
-    transHtml += '<div style="color: var(--text2); padding: 12px;">No transactions available</div>';
-  }
-
-  transHtml += '</div></div>';
-  transactionsSection.innerHTML = transHtml;
-}
-
-function fsEveMapFitToCanvas() {
-  if (!fullscreenEveMap.canvas || !eveMap.data) return;
-  const w = fullscreenEveMap.canvas.width;
-  const h = fullscreenEveMap.canvas.height;
-  const pad = 50;
-
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  eveMap.data.systems.forEach(sys => {
-    minX = Math.min(minX, sys.x);
-    maxX = Math.max(maxX, sys.x);
-    minY = Math.min(minY, sys.y);
-    maxY = Math.max(maxY, sys.y);
-  });
-
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-  const scaleX = (w - pad * 2) / rangeX;
-  const scaleY = (h - pad * 2) / rangeY;
-  fullscreenEveMap.transform.scale = Math.min(scaleX, scaleY);
-  fullscreenEveMap.transform.offsetX = w / 2 - ((minX + maxX) / 2) * fullscreenEveMap.transform.scale;
-  fullscreenEveMap.transform.offsetY = h / 2 + ((minY + maxY) / 2) * fullscreenEveMap.transform.scale;
-}
-
-function fsMapToCanvas(x, y) {
-  return {
-    cx: x * fullscreenEveMap.transform.scale + fullscreenEveMap.transform.offsetX,
-    cy: -y * fullscreenEveMap.transform.scale + fullscreenEveMap.transform.offsetY
-  };
-}
-
-function drawFullscreenMap() {
-  const { canvas, ctx, transform } = fullscreenEveMap;
-  if (!canvas || !ctx || !eveMap.data) return;
-
-  const w = canvas.width, h = canvas.height;
-  const isDark = eveGetTheme() === 'dark';
-
-  ctx.fillStyle = isDark ? '#080810' : '#f5f5f7';
-  ctx.fillRect(0, 0, w, h);
-
-  const data = eveMap.data;
-  const dotR = 2;
-
-  // Draw stargate connections (within region)
-  ctx.strokeStyle = isDark ? 'rgba(60, 80, 140, 0.35)' : 'rgba(150, 150, 200, 0.25)';
-  ctx.lineWidth = 0.6;
-  data.connections.forEach(([a, b]) => {
-    const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
-    if (!sa || !sb) return;
-    const pa = fsMapToCanvas(sa.x, sa.y), pb = fsMapToCanvas(sb.x, sb.y);
-    ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
-  });
-
-  // Draw jump bridge connections (green dashed)
-  if (data.jumpBridges && data.jumpBridges.length > 0) {
-    ctx.strokeStyle = isDark ? 'rgba(100, 180, 100, 0.4)' : 'rgba(100, 160, 100, 0.35)';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([5, 4]);
-    data.jumpBridges.forEach(([a, b]) => {
-      const sa = eveMap.systemIndex[a], sb = eveMap.systemIndex[b];
-      if (!sa || !sb) return;
-      const pa = fsMapToCanvas(sa.x, sa.y), pb = fsMapToCanvas(sb.x, sb.y);
-      ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
-    });
-    ctx.setLineDash([]);
-  }
-
-  // Draw dashed connections to neighboring regions (stargate connections)
-  const neighboringSystems = fullscreenEveMap.neighboringSystems || {};
-  const currentSystemIds = new Set(data.systems.map(s => s.id));
-
-  ctx.strokeStyle = isDark ? 'rgba(60, 80, 140, 0.2)' : 'rgba(150, 150, 200, 0.15)';
-  ctx.lineWidth = 0.6;
-  ctx.setLineDash([3, 3]);
-
-  data.connections.forEach(([a, b]) => {
-    let localSysId = null, neighborSysId = null;
-
-    // Check if one system is local and one is neighboring
-    if (currentSystemIds.has(a) && neighboringSystems[b]) {
-      localSysId = a;
-      neighborSysId = b;
-    } else if (currentSystemIds.has(b) && neighboringSystems[a]) {
-      localSysId = b;
-      neighborSysId = a;
-    }
-
-    if (localSysId && neighborSysId) {
-      const localSys = eveMap.systemIndex[localSysId];
-      const neighborSys = neighboringSystems[neighborSysId];
-      if (localSys && neighborSys) {
-        const pa = fsMapToCanvas(localSys.x, localSys.y);
-        const pb = fsMapToCanvas(neighborSys.x, neighborSys.y);
-        ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
-      }
-    }
-  });
-
-  // Draw connections between neighboring systems (only between systems that are on the map)
-  const neighboringRegionConnections = fullscreenEveMap.neighboringRegionConnections || [];
-  const neighboringSystemIds = new Set(Object.keys(neighboringSystems).map(id => Number(id)));
-  if (neighboringRegionConnections.length > 0 && neighboringSystemIds.size > 0) {
-    ctx.strokeStyle = isDark ? 'rgba(80, 100, 140, 0.3)' : 'rgba(150, 150, 180, 0.25)';
-    ctx.lineWidth = 0.6;
-    neighboringRegionConnections.forEach(([a, b]) => {
-      // Only draw if both systems are neighboring systems on the map
-      if (neighboringSystemIds.has(a) && neighboringSystemIds.has(b)) {
-        const sysA = neighboringSystems[a];
-        const sysB = neighboringSystems[b];
-        if (sysA && sysB) {
-          const pa = fsMapToCanvas(sysA.x, sysA.y);
-          const pb = fsMapToCanvas(sysB.x, sysB.y);
-          ctx.beginPath(); ctx.moveTo(pa.cx, pa.cy); ctx.lineTo(pb.cx, pb.cy); ctx.stroke();
-        }
-      }
-    });
-  }
-
-  ctx.setLineDash([]);
-
-  // Draw systems and labels
-  const pulsePhase = (Date.now() / 50) % (Math.PI * 2);
-  ctx.font = '10px -apple-system, Segoe UI, sans-serif';
-  const bgColor = isDark ? '#080810' : '#f5f5f7';
-
-  // Clear background under neighboring systems (so lines don't show through)
-  Object.values(neighboringSystems).forEach(sys => {
-    const { cx, cy } = fsMapToCanvas(sys.x, sys.y);
-    if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
-    ctx.fillStyle = bgColor;
-    ctx.beginPath(); ctx.arc(cx, cy, dotR * 1.5, 0, Math.PI * 2); ctx.fill();
-  });
-
-  // Draw neighboring systems (dimmer)
-  Object.values(neighboringSystems).forEach(sys => {
-    const { cx, cy } = fsMapToCanvas(sys.x, sys.y);
-    if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
-    ctx.fillStyle = isDark ? 'rgba(100,100,120,0.5)' : 'rgba(150,150,150,0.4)';
-    ctx.beginPath(); ctx.arc(cx, cy, dotR * 0.8, 0, Math.PI * 2); ctx.fill();
-
-    // Draw system name and region name
-    ctx.font = '10px -apple-system, Segoe UI, sans-serif';
-    ctx.fillStyle = isDark ? 'rgba(150,150,170,0.6)' : 'rgba(120,120,120,0.5)';
-    ctx.fillText(sys.name, cx + 5, cy - 4);
-    ctx.font = '9px -apple-system, Segoe UI, sans-serif';
-    ctx.fillStyle = isDark ? 'rgba(120,120,140,0.5)' : 'rgba(130,130,130,0.4)';
-    ctx.fillText(sys.regionName || '?', cx + 5, cy + 6);
-  });
-
-  // Clear background under current region systems
-  data.systems.forEach(sys => {
-    const { cx, cy } = fsMapToCanvas(sys.x, sys.y);
-    if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
-    ctx.fillStyle = bgColor;
-    ctx.beginPath(); ctx.arc(cx, cy, dotR * 3.5, 0, Math.PI * 2); ctx.fill();
-  });
-
-  // Draw autopilot route if set
-  if (fullscreenEveMap.autopilotDestination) {
-    const currentLoc = Object.values(eveLocationState)[0];
-    let destSys = data.systems.find(s => s.id === fullscreenEveMap.autopilotDestination);
-
-    // Check if destination is a neighboring system
-    if (!destSys) {
-      destSys = neighboringSystems[fullscreenEveMap.autopilotDestination];
-    }
-
-    const currentSys = currentLoc ? data.systems.find(s => s.id === currentLoc.systemId) : null;
-
-    if (currentSys && destSys) {
-      // Find route through stargates and jump bridges
-      // Use all indexed systems (including cross-region jump bridge endpoints) for pathfinding
-      const allSystems = Object.values(eveMap.systemIndex);
-
-      // Combine all connections: current region + neighboring region connections
-      const allConnections = [...data.connections];
-      const neighboringConnections = fullscreenEveMap.neighboringRegionConnections || [];
-      neighboringConnections.forEach(conn => allConnections.push(conn));
-
-      const route = findRouteBetweenSystems(currentSys.id, destSys.id, allSystems, allConnections, data.jumpBridges);
-
-      if (route && route.length > 1) {
-        ctx.strokeStyle = isDark ? 'rgba(255, 180, 0, 0.5)' : 'rgba(255, 150, 0, 0.5)';
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 5]);
-        ctx.beginPath();
-
-        // Draw line through each system in the route
-        for (let i = 0; i < route.length; i++) {
-          const sys = route[i];
-          const pos = fsMapToCanvas(sys.x, sys.y);
-          if (i === 0) {
-            ctx.moveTo(pos.cx, pos.cy);
-          } else {
-            ctx.lineTo(pos.cx, pos.cy);
-          }
-        }
-        ctx.stroke();
-        ctx.setLineDash([]);
-      }
-    }
-  }
-
-  // Draw current region systems
-  data.systems.forEach(sys => {
-    const { cx, cy } = fsMapToCanvas(sys.x, sys.y);
-    if (cx < -20 || cx > w + 20 || cy < -20 || cy > h + 20) return;
-    const isCurrentLocation = Object.values(eveLocationState).some(loc => loc.systemId === sys.id);
-    const isDestination = fullscreenEveMap.autopilotDestination === sys.id;
-    const color = eveSecColor(sys.security);
-
-    if (isDestination) {
-      const glow = dotR * 5 + Math.sin(pulsePhase) * dotR * 2;
-      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
-      grad.addColorStop(0, 'rgba(255, 180, 0, 0.6)');
-      grad.addColorStop(1, 'rgba(255, 180, 0, 0)');
-      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx, cy, glow, 0, Math.PI * 2); ctx.fill();
-    }
-
-    if (isCurrentLocation) {
-      const glow = dotR * 5 + Math.sin(pulsePhase) * dotR * 2;
-      const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, glow);
-      grad.addColorStop(0, 'rgba(91,142,240,0.6)');
-      grad.addColorStop(1, 'rgba(91,142,240,0)');
-      ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(cx, cy, glow, 0, Math.PI * 2); ctx.fill();
-    }
-
-    ctx.fillStyle = isDestination ? '#ffa500' : (isCurrentLocation ? '#5b8ef0' : color);
-    ctx.beginPath(); ctx.arc(cx, cy, isCurrentLocation || isDestination ? dotR * 2.5 : dotR, 0, Math.PI * 2); ctx.fill();
-
-    // Draw system name
-    ctx.fillStyle = isDark ? 'rgba(200,200,200,0.7)' : 'rgba(80,80,80,0.7)';
-    ctx.fillText(sys.name, cx + 6, cy - 2);
-  });
-}
-
-function animateFullscreenMap() {
-  if (fullscreenEveMap.animFrame) {
-    cancelAnimationFrame(fullscreenEveMap.animFrame);
-  }
-  function frame() {
-    drawFullscreenMap();
-    fullscreenEveMap.animFrame = requestAnimationFrame(frame);
-  }
-  fullscreenEveMap.animFrame = requestAnimationFrame(frame);
-}
-
-function initFullscreenMapControls() {
-  const canvas = fullscreenEveMap.canvas;
-  if (!canvas) return;
-
-  let dragging = false;
-  let dragOrigin = null;
-
-  canvas.addEventListener('mousedown', e => {
-    dragging = true;
-    dragOrigin = { x: e.clientX - fullscreenEveMap.transform.offsetX, y: e.clientY - fullscreenEveMap.transform.offsetY };
-  });
-
-  window.addEventListener('mouseup', () => { dragging = false; });
-
-  canvas.addEventListener('mousemove', e => {
-    if (dragging && dragOrigin) {
-      fullscreenEveMap.transform.offsetX = e.clientX - dragOrigin.x;
-      fullscreenEveMap.transform.offsetY = e.clientY - dragOrigin.y;
-    }
-  });
-
-  canvas.addEventListener('wheel', e => {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const f = e.deltaY > 0 ? 0.85 : 1.18;
-    fullscreenEveMap.transform.offsetX = mx + (fullscreenEveMap.transform.offsetX - mx) * f;
-    fullscreenEveMap.transform.offsetY = my + (fullscreenEveMap.transform.offsetY - my) * f;
-    fullscreenEveMap.transform.scale *= f;
-  }, { passive: false });
-
-  // Right-click context menu
-  canvas.addEventListener('contextmenu', e => {
-    e.preventDefault();
-    const rect = canvas.getBoundingClientRect();
-    const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-
-    // Find which system was clicked
-    let clickedSystem = null;
-    const hitRadius = 12;
-    if (eveMap.data && eveMap.data.systems) {
-      eveMap.data.systems.forEach(sys => {
-        const { cx, cy } = fsMapToCanvas(sys.x, sys.y);
-        const d = Math.hypot(cx - mx, cy - my);
-        if (d < hitRadius && !clickedSystem) clickedSystem = sys;
-      });
-
-      // Also check neighboring systems
-      if (!clickedSystem && fullscreenEveMap.neighboringSystems) {
-        Object.values(fullscreenEveMap.neighboringSystems).forEach(sys => {
-          const { cx, cy } = fsMapToCanvas(sys.x, sys.y);
-          const d = Math.hypot(cx - mx, cy - my);
-          if (d < hitRadius && !clickedSystem) clickedSystem = sys;
-        });
-      }
-    }
-
-    if (clickedSystem) {
-      showFullscreenMapContextMenu(clickedSystem, e.clientX, e.clientY);
-    }
-  });
-}
 
 ipcRenderer.on('app-focus', () => {
   state.appIsFocused = true;
@@ -1555,7 +434,7 @@ ipcRenderer.on('update-available', (e, result) => {
 function ensureChat(key, defaults) {
   if (!state.chats[key]) {
     const savedState = loadChatState(key);
-    state.chats[key] = { messages: [], unread: 0, newMessagesWhileUnfocused: 0, participants: {}, ...defaults, ...savedState };
+    state.chats[key] = { messages: [], unread: 0, newMessagesWhileUnfocused: 0, participants: {}, motd: '', ...defaults, ...savedState };
   }
 }
 
@@ -1703,12 +582,6 @@ function renderAccountBar() {
   accountListEl.appendChild(btn);
   accountListEl.style.display = 'flex';
 
-  // Show/hide neocom bar based on EVE characters
-  const neocomBar = $('neocom-bar');
-  if (neocomBar) {
-    const hasEveChars = (acct.eveCharacters || []).length > 0;
-    neocomBar.style.display = hasEveChars ? 'flex' : 'none';
-  }
 }
 
 function renderLeftPanel() {
@@ -2130,8 +1003,8 @@ function openChat(key) {
   chatHeaderAv.className     = 'avatar ' + avatarColor(chat.jid);
   chatHeaderAv.style.borderRadius = isRoom ? '6px' : '10px';
   chatHeaderAv.textContent   = isRoom ? '#' : initials(chat.name);
-  chatHeaderName.textContent = chat.name;
-  chatHeaderSub.textContent  = chat.jid;
+  chatHeaderName.textContent = isRoom ? chat.jid : chat.name;
+  chatHeaderSub.textContent  = isRoom ? '' : chat.jid;
 
   const pp = document.getElementById('participants-panel');
   if (pp) { isRoom ? pp.classList.add('open') : pp.classList.remove('open'); }
@@ -2421,8 +1294,8 @@ function showAddAccountModal() {
     <div class="modal-title">Add GSF Jabber Account</div>
     <div id="modal-error"></div>
     <div class="form-group">
-      <label class="form-label">EVE Online Character Name</label>
-      <input class="form-input" id="fi-display-name" placeholder="Your main character name" autocomplete="off" />
+      <label class="form-label">Display Name</label>
+      <input class="form-input" id="fi-display-name" placeholder="Your display name" autocomplete="off" />
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
       <div class="form-group" style="margin:0">
@@ -2453,7 +1326,7 @@ window.submitAddAccount = () => {
   const errEl    = document.getElementById('modal-error');
 
   if (!displayNameInput || !username || !password) {
-    errEl.innerHTML = '<div class="strip error">EVE character name, username, and password are required.</div>';
+    errEl.innerHTML = '<div class="strip error">Display name, username, and password are required.</div>';
     return;
   }
 
@@ -2482,26 +1355,8 @@ window.submitAddAccount = () => {
 };
 
 function showAccountContextMenu(acct) {
-  const eveChars = acct.eveCharacters || [];
-  const eveListHtml = eveChars.length
-    ? eveChars.map(c => `
-        <div style="display:flex;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid var(--border)">
-          <span style="font-size:13px;flex:1;color:var(--text1)">${esc(c.characterName)}</span>
-          <span style="font-size:11px;color:var(--text3)">#${c.characterId}</span>
-          <button class="btn-danger" style="padding:2px 8px;font-size:11px"
-            onclick="unlinkEveCharacter('${esc(acct.id)}',${Number(c.characterId)})">Unlink</button>
-        </div>`).join('')
-    : '<div style="color:var(--text3);font-size:12px;padding:4px 0">No EVE characters linked yet.</div>';
-
   showModal(`
     <div class="modal-title">${esc(acct.displayName || acct.username + '@' + acct.server)}</div>
-    <div style="margin:12px 0 0">
-      <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:8px">EVE Online Characters</div>
-      <div id="eve-chars-list">${eveListHtml}</div>
-      <button class="btn-secondary" id="btn-link-eve" style="margin-top:8px;width:100%"
-        onclick="linkEveCharacter('${esc(acct.id)}')">+ Link EVE Character</button>
-      <div id="eve-link-status" style="font-size:12px;margin-top:6px;min-height:18px;color:var(--text3)"></div>
-    </div>
     <div class="modal-actions" style="margin-top:16px">
       <button class="btn-secondary" onclick="hideModal()">Cancel</button>
       <button class="btn-primary"   onclick="showEditAccountModal('${esc(acct.id)}')">Edit</button>
@@ -2510,50 +1365,6 @@ function showAccountContextMenu(acct) {
   `);
 }
 
-window.linkEveCharacter = async (accountId) => {
-  const btn = document.getElementById('btn-link-eve');
-  const statusEl = document.getElementById('eve-link-status');
-  if (btn) { btn.disabled = true; btn.textContent = 'Opening browser…'; }
-  if (statusEl) statusEl.textContent = 'Complete the EVE login in your browser…';
-
-  try {
-    const result = await ipcRenderer.invoke('eve-link-character', { accountId });
-    if (result.success) {
-      const acct = state.accounts.find(a => a.id === accountId);
-      if (acct) {
-        if (!acct.eveCharacters) acct.eveCharacters = [];
-        if (!acct.eveCharacters.find(c => c.characterId === result.characterId)) {
-          acct.eveCharacters.push({ characterId: result.characterId, characterName: result.characterName });
-        }
-        saveAccounts();
-        hideModal();
-        showAccountContextMenu(acct);
-      }
-    } else {
-      if (btn) { btn.disabled = false; btn.textContent = '+ Link EVE Character'; }
-      if (statusEl) statusEl.textContent = '⚠ ' + (result.error || 'Unknown error');
-    }
-  } catch (err) {
-    if (btn) { btn.disabled = false; btn.textContent = '+ Link EVE Character'; }
-    if (statusEl) statusEl.textContent = '⚠ ' + err.message;
-  }
-};
-
-window.unlinkEveCharacter = async (accountId, characterId) => {
-  const id = Number(characterId);
-  const acct = state.accounts.find(a => a.id === accountId);
-  const char = acct?.eveCharacters?.find(c => Number(c.characterId) === id);
-  if (!confirm(`Unlink EVE character "${char?.characterName || id}"?`)) return;
-
-  await ipcRenderer.invoke('eve-unlink-character', { accountId, characterId: id });
-
-  if (acct?.eveCharacters) {
-    acct.eveCharacters = acct.eveCharacters.filter(c => Number(c.characterId) !== id);
-    saveAccounts();
-  }
-  hideModal();
-  if (acct) showAccountContextMenu(acct);
-};
 
 window.showEditAccountModal = (id) => {
   const acct = state.accounts.find(a => a.id === id);
@@ -3398,7 +2209,7 @@ window.showCreateRoomGroupModal = (accountId, roomJid, roomName) => {
     <div id="modal-error"></div>
     <div class="form-group">
       <label class="form-label">Group name</label>
-      <input class="form-input" id="fi-room-group-name" placeholder="e.g. Gaming, EVE, Social…" />
+      <input class="form-input" id="fi-room-group-name" placeholder="e.g. Gaming, Work, Social…" />
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" onclick="hideModal()">Cancel</button>
@@ -3490,6 +2301,7 @@ function showAccountSettingsModal() {
   const theme = settings.theme || 'dark';
   const alarmEnabled = settings.alarmEnabled !== false;  // Default to true
   const dmSoundEnabled = settings.dmSoundEnabled !== false;  // Default to true
+  const launchOnStartup = settings.launchOnStartup === true;  // Default to false
 
   showModal(`
     <div class="modal-title">Account Settings</div>
@@ -3524,6 +2336,14 @@ function showAccountSettingsModal() {
           <option value="dark" ${theme === 'dark' ? 'selected' : ''}>Dark</option>
           <option value="light" ${theme === 'light' ? 'selected' : ''}>Light</option>
         </select>
+      </div>
+    </div>
+
+    <div style="border-bottom: 1px solid var(--border); padding-bottom: 12px; margin-bottom: 12px;">
+      <div style="font-weight: 500; margin-bottom: 12px; font-size: 12px; color: var(--text2); text-transform: uppercase;">Application</div>
+      <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
+        <input type="checkbox" id="fi-launch-on-startup" ${launchOnStartup ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
+        <label for="fi-launch-on-startup" style="cursor: pointer; margin: 0;">Launch BeeTalk when Windows starts</label>
       </div>
     </div>
 
@@ -3569,6 +2389,7 @@ window.submitAccountSettings = () => {
     const theme = document.getElementById('fi-theme')?.value || 'dark';
     const alarmEnabled = document.getElementById('fi-alarm-enabled')?.checked ?? true;
     const dmSoundEnabled = document.getElementById('fi-dm-sound-enabled')?.checked ?? true;
+    const launchOnStartup = document.getElementById('fi-launch-on-startup')?.checked ?? false;
 
     const acct = getActiveAccount();
     if (acct) {
@@ -3582,8 +2403,11 @@ window.submitAccountSettings = () => {
     }
 
     // Save app settings
-    saveAppSettings({ theme, alarmEnabled, dmSoundEnabled });
+    saveAppSettings({ theme, alarmEnabled, dmSoundEnabled, launchOnStartup });
     setTheme(theme);
+
+    // Update Windows startup registration
+    ipcRenderer.send('set-launch-on-startup', { enabled: launchOnStartup });
 
     renderLeftPanel();
     hideModal();
@@ -3595,6 +2419,8 @@ window.submitAccountSettings = () => {
 function showChatInfoModal() {
   const chat = state.chats[state.activeChatKey];
   if (!chat) return;
+
+  console.log(`[showChatInfoModal] Chat key: ${state.activeChatKey}, motd: "${chat.motd}"`);
 
   const type = chat.type === 'room' ? 'Group Chat' : 'Direct Message';
   const participants = chat.participants ? Object.keys(chat.participants).length : 0;
@@ -3624,11 +2450,34 @@ function showChatInfoModal() {
           ` : ''}
         </div>
       </div>
+      ${chat.type === 'room' ? `
+        <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px;">
+          <div style="font-size: 12px; color: var(--text2); margin-bottom: 4px; text-transform: uppercase;">Subject</div>
+          <div id="chat-info-subject-display" style="padding: 10px 12px; background: var(--bg2); border-radius: var(--radius); border-left: 3px solid var(--accent); font-size: 13px; color: var(--text1); line-height: 1.6; word-wrap: break-word; overflow-wrap: break-word; white-space: pre-wrap;">
+            ${chat.motd ? escapeAndLinkify(chat.motd) : '—'}
+          </div>
+        </div>
+      ` : ''}
     </div>
     <div class="modal-actions">
       <button class="btn-primary" onclick="hideModal()">Close</button>
     </div>
   `);
+
+  state.chatInfoModalOpen = true;
+  state.chatInfoModalKey = state.activeChatKey;
+}
+
+function updateChatInfoModalSubject() {
+  if (!state.chatInfoModalOpen || !state.chatInfoModalKey) return;
+
+  const chat = state.chats[state.chatInfoModalKey];
+  if (!chat || chat.type !== 'room') return;
+
+  const subjectEl = document.getElementById('chat-info-subject-display');
+  if (subjectEl) {
+    subjectEl.innerHTML = chat.motd ? escapeAndLinkify(chat.motd) : '—';
+  }
 }
 
 window.checkForUpdate = async () => {
@@ -3712,7 +2561,8 @@ function saveChatState(key) {
   if (!chat) return;
   const data = {
     lastReadTs: chat.lastReadTs || 0,
-    unread: 0  // Reset unread when saving
+    unread: 0,  // Reset unread when saving
+    motd: chat.motd || ''
   };
   localStorage.setItem('chat_' + key, JSON.stringify(data));
 }
@@ -3822,22 +2672,6 @@ async function loadAndConnect() {
   state.activeAccountId = state.accounts[0].id;
   renderAccountBar();
   renderLeftPanel();
-  renderEveMapPanel();
-  initEveMapCanvas();
-  updateEveMapPanelVisibility();
-
-  // Load EVE region on startup
-  const eveChars = state.accounts.flatMap(a => a.eveCharacters || []);
-  if (eveChars.length > 0 && eveMap.canvas) {
-    const lastSystemId = localStorage.getItem('lastEveSystem');
-    const systemToLoad = lastSystemId ? Number(lastSystemId) : 30000142; // Jita as default
-    eveMapLoadRegion(systemToLoad);
-
-    // Trigger location fetch immediately if we have EVE characters
-    setTimeout(() => {
-      ipcRenderer.send('fetch-eve-locations');
-    }, 500);
-  }
 
   state.accounts.forEach(a => ipcRenderer.send('xmpp-connect', a));
 
@@ -3848,23 +2682,6 @@ async function loadAndConnect() {
   }
 }
 
-function updateEveMapPanelVisibility() {
-  const hasEveCharacters = state.accounts.some(a => a.eveCharacters?.length > 0);
-  const panel = $('eve-map-panel');
-  if (panel) {
-    if (hasEveCharacters) {
-      panel.classList.add('visible');
-    } else {
-      panel.classList.remove('visible');
-    }
-  }
-}
-
-document.getElementById('btn-jump-bridges')?.addEventListener('click', () => {
-  eveMap.showJumpBridges = !eveMap.showJumpBridges;
-  const btn = document.getElementById('btn-jump-bridges');
-  btn.textContent = `Jump Bridges: ${eveMap.showJumpBridges ? 'ON' : 'OFF'}`;
-});
 
 // ─────────────────────────────────────────────
 //  App Settings
@@ -4307,7 +3124,7 @@ async function loadMessageHistory(key) {
     const messages = await ipcRenderer.invoke('load-message-history', {
       accountId: account.id,
       'with': chat.jid,
-      count: 100
+      count: 500
     });
 
     if (messages && messages.length > 0) {
@@ -4534,38 +3351,6 @@ $('btn-close').addEventListener('click', () => ipcRenderer.send('window-close'))
 // $('btn-add-account').addEventListener('click', showAddAccountModal);
 // $('btn-welcome-add').addEventListener('click', showAddAccountModal);
 
-// Neocom map button
-$('btn-neocom-map')?.addEventListener('click', showFullscreenMap);
-$('btn-neocom-wallet')?.addEventListener('click', showFullscreenWallet);
-$('btn-close-wallet')?.addEventListener('click', hideFullscreenWallet);
-$('btn-close-fullmap')?.addEventListener('click', hideFullscreenMap);
-
-// Debug: check system connections
-window.debugSystemConnections = (systemName) => {
-  if (!eveMap.data) return;
-  const sys = eveMap.data.systems.find(s => s.name === systemName);
-  if (!sys) { console.log(`System ${systemName} not found in current region`); return; }
-  console.log(`System: ${sys.name} (${sys.id})`);
-  const connections = eveMap.data.connections.filter(([a, b]) => a === sys.id || b === sys.id);
-  console.log(`Found ${connections.length} connections:`);
-  connections.forEach(([a, b]) => {
-    const otherId = a === sys.id ? b : a;
-    const otherSys = eveMap.systemIndex[otherId];
-    console.log(`  -> ${otherSys?.name || otherId} (${otherId})`);
-  });
-};
-$('eve-char-selector').addEventListener('change', (e) => {
-  const id = Number(e.target.value);
-  if (id) {
-    eveTrackedCharacterId = id;
-    renderEveMapPanel();
-    const loc = eveLocationState[id];
-    if (loc) {
-      eveMap.focusSystemId = loc.systemId;
-      eveMapLoadRegion(loc.systemId);
-    }
-  }
-});
 $('btn-browse-rooms').addEventListener('click', showBrowseRoomsModal);
 $('btn-settings').addEventListener('click', showAccountSettingsModal);
 btnReconnect.addEventListener('click', () => {

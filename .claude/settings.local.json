@@ -7,7 +7,26 @@
       "WebFetch(domain:riftforeve.online)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(node --check src/app.js)",
-      "WebFetch(domain:developers.eveonline.com)"
+      "WebFetch(domain:developers.eveonline.com)",
+      "Bash(npm start *)",
+      "Bash(awk '/^function renderEveMapCanvas/,/^}$/{print NR\": \"$0}' src/app.js)",
+      "Bash(git checkout *)",
+      "Bash(awk '/^ipcRenderer.on\\\\\\(.*app-focus/{print NR\": \"$0; exit}' src/app.js)",
+      "Bash(head -294 src/app.js)",
+      "Bash(tail -n +1408 src/app.js)",
+      "Read(//tmp/**)",
+      "Bash(grep -v \"^//\")",
+      "Bash(grep -v \"^//\\\\|addEventListener\")",
+      "Bash(grep -v \"^//\\\\|addEventListener\\\\|pointer\\\\|event\\\\|EVE, Social\")",
+      "Bash(node -c src/app.js)",
+      "Bash(node -c src/main.js)",
+      "Bash(python3)",
+      "PowerShell(Stop-Process *)",
+      "Bash(npm ls *)",
+      "Bash(timeout 20 tail -f \"C:\\\\Users\\\\oudsh\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-oudsh-Downloads-BeeTalk\\\\01a63031-cdf2-473b-8756-56c4c2f01120\\\\tasks\\\\bry6xbtm8.output\")",
+      "PowerShell(taskkill *)",
+      "Bash(timeout 20 tail -f \"C:\\\\Users\\\\oudsh\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-oudsh-Downloads-BeeTalk\\\\01a63031-cdf2-473b-8756-56c4c2f01120\\\\tasks\\\\bkp1af7kr.output\")",
+      "Bash(timeout 25 tail -f \"C:\\\\Users\\\\oudsh\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\C--Users-oudsh-Downloads-BeeTalk\\\\01a63031-cdf2-473b-8756-56c4c2f01120\\\\tasks\\\\bpxplnpta.output\")"
     ]
   }
 }

@@ -2,6 +2,8 @@ const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell } = require
 const path = require('path');
 const crypto = require('crypto');
 const http = require('http');
+const fs = require('fs');
+const os = require('os');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
 const keytar = require('keytar');
@@ -10,15 +12,6 @@ const store = new Store();
 const KEYTAR_SERVICE = 'BeeTalk';
 const OLD_KEYTAR_SERVICE = 'Gabber'; // for migration
 
-// ─────────────────────────────────────────────
-//  EVE Online ESI — set your Client ID from https://developers.eveonline.com/
-//  Callback URL to register: http://localhost:7777/callback
-// ─────────────────────────────────────────────
-const EVE_CLIENT_ID = '9f17e8fe55774cc596a699ad0dcd44c5';  // <-- paste your EVE application Client ID here
-const EVE_CALLBACK_PORT = 7777;
-const EVE_CALLBACK_URL = `http://localhost:${EVE_CALLBACK_PORT}/callback`;
-const EVE_AUTH_URL = 'https://login.eveonline.com/v2/oauth/authorize';
-const EVE_TOKEN_URL = 'https://login.eveonline.com/v2/oauth/token';
 
 let mainWindow;
 let tray;
@@ -26,126 +19,30 @@ let unreadCount = 0;
 
 const connections    = {};  // accountId -> { _xmpp, account }
 const reconnectTimers = {}; // accountId -> timer handle
+const intelLastTimestamps = {}; // channelKey -> last timestamp we've seen
+let knownNeutrals = new Set();  // Cache of known neutral names for reliable parsing
+let validatedNeutrals = {};  // neutralName -> { valid: bool, characterId?: number, checked: timestamp }
+let intelPollingTimer = null;
+
+// Load and save intel caches
+function loadIntelCaches() {
+  const cached = store.get('intelCaches', { knownNeutrals: [], validatedNeutrals: {} });
+  knownNeutrals = new Set(cached.knownNeutrals || []);
+  validatedNeutrals = cached.validatedNeutrals || {};
+  console.log(`[Intel] Loaded ${knownNeutrals.size} known neutrals and ${Object.keys(validatedNeutrals).length} validation results from cache`);
+}
+
+function saveIntelCaches() {
+  store.set('intelCaches', {
+    knownNeutrals: Array.from(knownNeutrals),
+    validatedNeutrals
+  });
+}
 
 // Ensure OS-level app identity uses BeeTalk instead of the Electron default name.
 app.setName('BeeTalk');
 
-// ─────────────────────────────────────────────
-//  EVE Token Refresh
-// ─────────────────────────────────────────────
-async function refreshEveToken(characterId, tokens) {
-  try {
-    const params = new URLSearchParams({
-      grant_type: 'refresh_token',
-      refresh_token: tokens.refreshToken,
-      client_id: EVE_CLIENT_ID,
-    });
 
-    const resp = await fetch(EVE_TOKEN_URL, {
-      method: 'POST',
-      body: params,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
-    });
-
-    if (!resp.ok) {
-      console.error(`Token refresh failed for ${characterId}: ${resp.status}`);
-      return null;
-    }
-
-    const newTokens = await resp.json();
-    const updatedTokens = {
-      accessToken: newTokens.access_token,
-      refreshToken: newTokens.refresh_token || tokens.refreshToken,
-      expiresAt: Date.now() + (newTokens.expires_in * 1000)
-    };
-
-    const eveTokens = store.get('eveTokens', {});
-    eveTokens[characterId] = updatedTokens;
-    store.set('eveTokens', eveTokens);
-
-    console.log(`Token refreshed for character ${characterId}`);
-    return updatedTokens;
-  } catch (err) {
-    console.error(`Token refresh error for ${characterId}:`, err.message);
-    return null;
-  }
-}
-
-// ─────────────────────────────────────────────
-//  EVE Character Location Polling
-// ─────────────────────────────────────────────
-let eveLocationPollTimer = null;
-async function fetchEveLocations() {
-  const eveTokens = store.get('eveTokens', {});
-  const accounts = store.get('accounts', []);
-
-  if (Object.keys(eveTokens).length === 0) return;
-
-  for (const [characterId, initialTokens] of Object.entries(eveTokens)) {
-    const account = accounts.find(a => a.eveCharacters?.some(c => c.characterId === Number(characterId)));
-    if (!account) continue;
-
-    const character = account.eveCharacters.find(c => c.characterId === Number(characterId));
-    if (!character) continue;
-
-    try {
-      let tokens = initialTokens;
-      let locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
-        headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
-      });
-
-      if (locResp.status === 401) {
-        const refreshedTokens = await refreshEveToken(characterId, tokens);
-        if (!refreshedTokens) continue;
-        tokens = refreshedTokens;
-        locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
-          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
-        });
-      }
-
-      if (!locResp.ok) continue;
-
-      const locData = await locResp.json();
-      const systemId = locData.solar_system_id;
-
-      const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
-      if (!systemResp.ok) continue;
-
-      const systemData = await systemResp.json();
-      const systemName = systemData.name;
-      let regionName = '';
-
-      try {
-        const constResp = await fetch(`https://esi.evetech.net/latest/universe/constellations/${systemData.constellation_id}/`);
-        if (constResp.ok) {
-          const constData = await constResp.json();
-          const regionResp = await fetch(`https://esi.evetech.net/latest/universe/regions/${constData.region_id}/`);
-          if (regionResp.ok) {
-            const regionData = await regionResp.json();
-            regionName = regionData.name;
-          }
-        }
-      } catch (err) {
-        // Fail silently
-      }
-
-      send('eve-location-update', { accountId: account.id, characterId: Number(characterId), characterName: character.characterName, systemId, systemName, regionName });
-    } catch (err) {
-      // Fail silently
-    }
-  }
-}
-function startEveLocationPolling() {
-  if (eveLocationPollTimer) return;
-  fetchEveLocations();  // Fetch immediately
-  eveLocationPollTimer = setInterval(fetchEveLocations, 10000);  // Poll every 10 seconds
-}
-function stopEveLocationPolling() {
-  if (eveLocationPollTimer) {
-    clearInterval(eveLocationPollTimer);
-    eveLocationPollTimer = null;
-  }
-}
 
 // ─────────────────────────────────────────────
 //  Credential Management (Keytar)
@@ -422,11 +319,22 @@ function handleStanza(accountId, stanza) {
 
   if (name === 'message') {
     const body = stanza.getChildText('body');
-    if (!body) return;
-
+    const subject = stanza.getChildText('subject');
     const from = stanza.attrs.from;
     const type = stanza.attrs.type || 'chat';
     const senderName = from.split('@')[0];
+
+    // Handle room subject (MOTD) - can come with or without body
+    if (type === 'groupchat' && subject) {
+      const roomJid = from.split('/')[0];
+      console.log(`[XMPP] Room subject received: ${roomJid} = "${subject}"`);
+      send('xmpp-room-subject', { accountId, roomJid, subject });
+      // Continue to process body if present
+      if (!body) return;
+    }
+
+    // Skip messages without body (unless they're room subjects, which we handled above)
+    if (!body) return;
 
     // Get timestamp from delay element if present (for archived messages), otherwise use now
     let ts = Date.now();
@@ -490,10 +398,6 @@ ipcMain.on('xmpp-connect', (e, account) => {
   });
 });
 ipcMain.on('xmpp-disconnect', (e, { id })  => destroyConnection(id));
-
-ipcMain.on('fetch-eve-locations', async (e) => {
-  await fetchEveLocations();
-});
 
 ipcMain.on('xmpp-send-message', (e, { accountId, to, body, type }) => {
   const c = connections[accountId];
@@ -677,6 +581,29 @@ ipcMain.on('open-link', (e, url) => {
   }
 });
 
+ipcMain.on('set-launch-on-startup', (e, { enabled }) => {
+  try {
+    // On Windows, clean up old "Electron" entry from registry if it exists
+    if (process.platform === 'win32') {
+      const { execSync } = require('child_process');
+      try {
+        execSync('reg delete "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run" /v Electron /f', { stdio: 'ignore' });
+      } catch (err) {
+        // Entry doesn't exist, that's fine
+      }
+    }
+
+    app.setLoginItemSettings({
+      openAtLogin: enabled,
+      openAsHidden: true,
+      path: app.getPath('exe')
+    });
+    console.log(`[App] Launch on startup: ${enabled ? 'enabled' : 'disabled'}`);
+  } catch (err) {
+    console.error('[App] Error setting launch on startup:', err);
+  }
+});
+
 ipcMain.handle('load-emoticons', async () => {
   const fs = require('fs');
   const basePath = path.join(__dirname, '../assets/emoticons');
@@ -783,8 +710,6 @@ ipcMain.handle('load-emoticons', async () => {
 });
 
 // ─────────────────────────────────────────────
-//  EVE Online OAuth2 + PKCE helpers
-// ─────────────────────────────────────────────
 function eveGenerateCodeVerifier() {
   return crypto.randomBytes(32).toString('base64url');
 }
@@ -801,233 +726,7 @@ function eveDecodeJwtPayload(token) {
   }
 }
 
-ipcMain.handle('eve-link-character', async (e, { accountId }) => {
-  if (!EVE_CLIENT_ID) {
-    return { success: false, error: 'EVE_CLIENT_ID is not set. Edit src/main.js and paste your Client ID from https://developers.eveonline.com/' };
-  }
 
-  const codeVerifier = eveGenerateCodeVerifier();
-  const codeChallenge = eveGenerateCodeChallenge(codeVerifier);
-  const oauthState = crypto.randomBytes(8).toString('hex');
-
-  const params = new URLSearchParams({
-    response_type: 'code',
-    redirect_uri: EVE_CALLBACK_URL,
-    client_id: EVE_CLIENT_ID,
-    scope: [                                                  
-      'publicData',                                           
-      'esi-calendar.respond_calendar_events.v1',              
-      'esi-calendar.read_calendar_events.v1',                 
-      'esi-location.read_location.v1',                        
-      'esi-location.read_ship_type.v1',                       
-      'esi-mail.organize_mail.v1',                            
-      'esi-mail.read_mail.v1',                                
-      'esi-mail.send_mail.v1',                                
-      'esi-skills.read_skills.v1',                            
-      'esi-skills.read_skillqueue.v1',                        
-      'esi-wallet.read_character_wallet.v1',                  
-      'esi-wallet.read_corporation_wallet.v1',                
-      'esi-search.search_structures.v1',                      
-      'esi-clones.read_clones.v1',                            
-      'esi-characters.read_contacts.v1',                      
-      'esi-universe.read_structures.v1',                      
-      'esi-killmails.read_killmails.v1',                      
-      'esi-corporations.read_corporation_membership.v1',      
-      'esi-assets.read_assets.v1',                            
-      'esi-planets.manage_planets.v1',                        
-      'esi-fleets.read_fleet.v1',                             
-      'esi-fleets.write_fleet.v1',                            
-      'esi-ui.open_window.v1',                                
-      'esi-ui.write_waypoint.v1',                             
-      'esi-characters.write_contacts.v1',                     
-      'esi-fittings.read_fittings.v1',                        
-      'esi-fittings.write_fittings.v1',                       
-      'esi-markets.structure_markets.v1',                     
-      'esi-corporations.read_structures.v1',                  
-      'esi-characters.read_loyalty.v1',                       
-      'esi-characters.read_chat_channels.v1',                 
-      'esi-characters.read_medals.v1',                        
-      'esi-characters.read_standings.v1',                     
-      'esi-characters.read_agents_research.v1',               
-      'esi-industry.read_character_jobs.v1',                  
-      'esi-markets.read_character_orders.v1',                 
-      'esi-characters.read_blueprints.v1',                    
-      'esi-characters.read_corporation_roles.v1',             
-      'esi-location.read_online.v1',                          
-      'esi-contracts.read_character_contracts.v1',            
-      'esi-clones.read_implants.v1',                          
-      'esi-characters.read_fatigue.v1',                       
-      'esi-killmails.read_corporation_killmails.v1',          
-      'esi-corporations.track_members.v1',                    
-      'esi-wallet.read_corporation_wallets.v1',               
-      'esi-characters.read_notifications.v1',                 
-      'esi-corporations.read_divisions.v1',                   
-      'esi-corporations.read_contacts.v1',                    
-      'esi-assets.read_corporation_assets.v1',                
-      'esi-corporations.read_titles.v1',                      
-      'esi-corporations.read_blueprints.v1',                  
-      'esi-contracts.read_corporation_contracts.v1',          
-      'esi-corporations.read_standings.v1',                   
-      'esi-corporations.read_starbases.v1',                   
-      'esi-industry.read_corporation_jobs.v1',                
-      'esi-markets.read_corporation_orders.v1',               
-      'esi-corporations.read_container_logs.v1',              
-      'esi-industry.read_character_mining.v1',                
-      'esi-industry.read_corporation_mining.v1',              
-      'esi-planets.read_customs_offices.v1',                  
-      'esi-corporations.read_facilities.v1',                  
-      'esi-corporations.read_medals.v1',                      
-      'esi-characters.read_titles.v1',                        
-      'esi-alliances.read_contacts.v1',                       
-      'esi-characters.read_fw_stats.v1',                      
-      'esi-corporations.read_fw_stats.v1',                    
-      'esi-corporations.read_projects.v1',                    
-      'esi-corporations.read_freelance_jobs.v1',              
-      'esi-characters.read_freelance_jobs.v1',                
-      'esi-structures.read_corporation.v1',                   
-      'esi-structures.read_character.v1',                     
-      'esi-activities.read_character.v1',                     
-      'esi-access.read_lists.v1',                             
-    ].join(' '),                                              
-  state: oauthState,
-  code_challenge: codeChallenge,
-  code_challenge_method: 'S256'
-  });
-  const authUrl = `${EVE_AUTH_URL}?${params}`;
-
-  let code;
-  try {
-    code = await new Promise((resolve, reject) => {
-      let server;
-      const timeout = setTimeout(() => {
-        server?.close();
-        reject(new Error('Timed out waiting for EVE login (5 min).'));
-      }, 5 * 60 * 1000);
-
-      server = http.createServer((req, res) => {
-        const url = new URL(req.url, `http://localhost:${EVE_CALLBACK_PORT}`);
-        if (url.pathname !== '/callback') { res.writeHead(404); res.end(); return; }
-
-        const returnedCode = url.searchParams.get('code');
-        const returnedState = url.searchParams.get('state');
-
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-        res.end('<html><body style="font-family:sans-serif;padding:40px"><h2>EVE login successful!</h2><p>You may close this tab and return to BeeTalk.</p></body></html>');
-        server.close();
-        clearTimeout(timeout);
-
-        if (returnedState !== oauthState) { reject(new Error('State mismatch — retry the link.')); return; }
-        if (!returnedCode) { reject(new Error('No authorisation code received.')); return; }
-        resolve(returnedCode);
-      });
-
-      server.on('error', (err) => { clearTimeout(timeout); reject(err); });
-      server.listen(EVE_CALLBACK_PORT, '127.0.0.1', () => shell.openExternal(authUrl));
-    });
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-
-  let tokens;
-  try {
-    const tokenRes = await fetch(EVE_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
-        grant_type: 'authorization_code',
-        code,
-        client_id: EVE_CLIENT_ID,
-        code_verifier: codeVerifier,
-        redirect_uri: EVE_CALLBACK_URL
-      })
-    });
-    if (!tokenRes.ok) {
-      const text = await tokenRes.text();
-      return { success: false, error: `Token exchange failed: ${text}` };
-    }
-    tokens = await tokenRes.json();
-  } catch (err) {
-    return { success: false, error: `Token request error: ${err.message}` };
-  }
-
-  const payload = eveDecodeJwtPayload(tokens.access_token);
-  if (!payload) return { success: false, error: 'Could not decode EVE token.' };
-
-  const characterId = parseInt(payload.sub?.split(':')[2], 10);
-  const characterName = payload.name;
-  if (!characterId || !characterName) return { success: false, error: 'Token missing character info.' };
-
-  // Store EVE tokens (in store file, not keytar which has size limits)
-  const eveTokens = store.get('eveTokens', {});
-  eveTokens[characterId] = {
-    accessToken: tokens.access_token,
-    refreshToken: tokens.refresh_token,
-    expiresAt: Date.now() + (tokens.expires_in || 1200) * 1000
-  };
-  store.set('eveTokens', eveTokens);
-
-  const accounts = store.get('accounts', []);
-  const account = accounts.find(a => a.id === accountId);
-  if (account) {
-    if (!account.eveCharacters) account.eveCharacters = [];
-    if (!account.eveCharacters.find(c => c.characterId === characterId)) {
-      account.eveCharacters.push({ characterId, characterName });
-    }
-    store.set('accounts', accounts);
-    // Notify renderer that EVE character was linked
-    send('eve-character-linked', { accountId, characterId, characterName });
-
-    // Fetch character location and send to renderer
-    try {
-      const locResp = await fetch(`https://esi.evetech.net/latest/characters/${characterId}/location/`, {
-        headers: { 'Authorization': `Bearer ${tokens.access_token}` }
-      });
-      if (locResp.ok) {
-        const locData = await locResp.json();
-        const systemId = locData.solar_system_id;
-        const systemResp = await fetch(`https://esi.evetech.net/latest/universe/systems/${systemId}/`);
-        if (systemResp.ok) {
-          const systemData = await systemResp.json();
-          const systemName = systemData.name;
-          // Try to find region name
-          let regionName = '';
-          try {
-            const constResp = await fetch(`https://esi.evetech.net/latest/universe/constellations/${systemData.constellation_id}/`);
-            if (constResp.ok) {
-              const constData = await constResp.json();
-              const regionResp = await fetch(`https://esi.evetech.net/latest/universe/regions/${constData.region_id}/`);
-              if (regionResp.ok) {
-                const regionData = await regionResp.json();
-                regionName = regionData.name;
-              }
-            }
-          } catch (err) {
-            // Fail silently
-          }
-          send('eve-location-update', { accountId, characterId, characterName, systemId, systemName, regionName });
-        }
-      }
-    } catch (err) {
-      // Fail silently
-    }
-  }
-
-  return { success: true, characterId, characterName };
-});
-
-ipcMain.handle('eve-unlink-character', async (e, { accountId, characterId }) => {
-  const eveTokens = store.get('eveTokens', {});
-  delete eveTokens[characterId];
-  store.set('eveTokens', eveTokens);
-
-  const accounts = store.get('accounts', []);
-  const account = accounts.find(a => a.id === accountId);
-  if (account?.eveCharacters) {
-    account.eveCharacters = account.eveCharacters.filter(c => c.characterId !== characterId);
-    store.set('accounts', accounts);
-  }
-  return { success: true };
-});
 
 ipcMain.handle('eve-get-characters', async (e, { accountId }) => {
   const accounts = store.get('accounts', []);
@@ -1035,9 +734,6 @@ ipcMain.handle('eve-get-characters', async (e, { accountId }) => {
   return account?.eveCharacters || [];
 });
 
-// ─────────────────────────────────────────────
-//  EVE Universe Preload from Static Data Export
-// ─────────────────────────────────────────────
 const eveUniverseCache = { regions: {}, systems: {}, stargates: {} };
 let eveUniverseLoaded = false;
 
@@ -1140,7 +836,7 @@ async function preloadEveUniverse() {
         }
       }
 
-      // Build system list using official position2D
+      // Build system list using official position2D coordinates (matches in-game map orientation)
       const systems = regionSystems.map(sys => {
         const sysName = typeof sys.name === 'object' ? (sys.name.en || Object.values(sys.name)[0]) : sys.name;
         return {
@@ -1169,123 +865,48 @@ async function preloadEveUniverse() {
   }
 }
 
-ipcMain.handle('eve-get-systems', async (e, { systemIds }) => {
-  try {
-    if (!eveUniverseLoaded) return [];
 
-    const systems = [];
-    const numericIds = systemIds.map(id => Number(id));
 
-    for (const sysId of numericIds) {
-      for (const [regionId, region] of Object.entries(eveUniverseCache.regions)) {
-        if (!region.systems) continue;
-        const sys = region.systems.find(s => {
-          const sid = Number(s.id);
-          return sid === sysId;
-        });
-        if (sys) {
-          systems.push({ ...sys, regionName: region.regionName, region_id: Number(regionId) });
-          break;
-        }
-      }
-    }
-    return systems;
-  } catch (err) {
-    return [];
+// Validate neutral name against zKillboard API
+async function validateNeutralName(name) {
+  if (!name || name.length === 0) return false;
+
+  // Check if we've already validated this name recently (cache for 24 hours)
+  const cached = validatedNeutrals[name];
+  if (cached && Date.now() - cached.checked < 24 * 60 * 60 * 1000) {
+    return cached.valid;
   }
-});
 
-ipcMain.handle('eve-load-region-map', async (e, { systemId }) => {
   try {
-    // Find the system in cache
-    const system = eveUniverseCache.systems[systemId];
-    if (!system) return null;
-
-    // Find the region that contains this system
-    let targetRegion = null;
-    for (const [regionId, regionData] of Object.entries(eveUniverseCache.regions)) {
-      if (regionData.systems.some(s => s.id === systemId)) {
-        targetRegion = regionData;
-        break;
-      }
+    const response = await fetch(`https://zkillboard.com/api/search/character/${encodeURIComponent(name)}/`);
+    if (!response.ok) {
+      validatedNeutrals[name] = { valid: false, checked: Date.now() };
+      saveIntelCaches();
+      return false;
     }
 
-    if (!targetRegion) return null;
-
-    return {
-      regionName: targetRegion.regionName,
-      regionId: targetRegion.regionId,
-      currentSystemId: systemId,
-      systems: targetRegion.systems,
-      connections: targetRegion.connections,
-      jumpBridges: targetRegion.jumpBridges || []
-    };
+    const data = await response.json();
+    // zKillboard returns array of matches, check if exact name exists
+    const isValid = Array.isArray(data) && data.length > 0;
+    validatedNeutrals[name] = { valid: isValid, characterId: isValid ? data[0].character_id : null, checked: Date.now() };
+    console.log(`[Intel] Validated "${name}": ${isValid ? 'valid' : 'invalid'}`);
+    saveIntelCaches();
+    return isValid;
   } catch (err) {
-    return null;
+    console.error(`[Intel] Validation error for "${name}":`, err.message);
+    validatedNeutrals[name] = { valid: false, checked: Date.now() };
+    saveIntelCaches();
+    return false;
   }
-});
+}
 
-ipcMain.handle('eve-get-all-regions', async (e) => {
-  try {
-    const regions = Object.values(eveUniverseCache.regions || {});
-    return regions;
-  } catch (err) {
-    return [];
-  }
-});
 
-ipcMain.handle('eve-get-region-connections', async (e, { regionIds }) => {
-  try {
-    if (!eveUniverseLoaded) return [];
 
-    const connections = [];
-    regionIds.forEach(regionId => {
-      const region = eveUniverseCache.regions[regionId];
-      if (region && region.connections) {
-        connections.push(...region.connections);
-      }
-    });
-    return connections;
-  } catch (err) {
-    return [];
-  }
-});
 
-ipcMain.handle('eve-set-autopilot', async (e, { characterId, destinationId, clearWaypoints = true }) => {
-  try {
-    const eveTokens = store.get('eveTokens', {});
-    const tokens = eveTokens[characterId];
-    if (!tokens) return { success: false, error: 'No tokens found' };
 
-    let resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/?destination_id=${destinationId}&clear_other_waypoints=${clearWaypoints}&add_to_beginning=false`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${tokens.accessToken}`
-      }
-    });
 
-    if (resp.status === 401) {
-      const refreshedTokens = await refreshEveToken(characterId, tokens);
-      if (!refreshedTokens) return { success: false, error: 'Token refresh failed' };
 
-      resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/?destination_id=${destinationId}&clear_other_waypoints=${clearWaypoints}&add_to_beginning=false`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${refreshedTokens.accessToken}`
-        }
-      });
-    }
 
-    if (resp.ok) {
-      return { success: true };
-    } else {
-      const errorText = await resp.text();
-      return { success: false, error: `HTTP ${resp.status}: ${errorText}` };
-    }
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-});
 
 ipcMain.handle('eve-get-autopilot-waypoint', async (e, { characterId }) => {
   try {
@@ -1321,69 +942,8 @@ ipcMain.handle('eve-get-autopilot-waypoint', async (e, { characterId }) => {
   }
 });
 
-ipcMain.handle('eve-get-wallet', async (e, { characterIds }) => {
-  try {
-    const eveTokens = store.get('eveTokens', {});
-    const accounts = store.get('accounts', []);
-    const balances = {};
-    const transactions = {};
 
-    for (const charId of characterIds) {
-      const tokens = eveTokens[charId];
-      if (!tokens) continue;
-
-      try {
-        // Fetch wallet balance
-        const balResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/`, {
-          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
-        });
-
-        if (balResp.status === 401) {
-          const refreshedTokens = await refreshEveToken(charId, tokens);
-          if (refreshedTokens) {
-            const retryResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/`, {
-              headers: { 'Authorization': `Bearer ${refreshedTokens.accessToken}` }
-            });
-            if (retryResp.ok) {
-              balances[charId] = await retryResp.json();
-            }
-          }
-        } else if (balResp.ok) {
-          balances[charId] = await balResp.json();
-        }
-
-        // Fetch wallet journal (all transaction types - last 50)
-        let journalResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/journal/?limit=50`, {
-          headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
-        });
-
-        if (journalResp.status === 401) {
-          const refreshedTokens = await refreshEveToken(charId, tokens);
-          if (refreshedTokens) {
-            journalResp = await fetch(`https://esi.evetech.net/latest/characters/${charId}/wallet/journal/?limit=50`, {
-              headers: { 'Authorization': `Bearer ${refreshedTokens.accessToken}` }
-            });
-          }
-        }
-
-        if (journalResp.ok) {
-          transactions[charId] = await journalResp.json();
-        }
-      } catch (err) {
-        // Continue to next character
-      }
-    }
-
-    return { balances, transactions };
-  } catch (err) {
-    return { balances: {}, transactions: {} };
-  }
-});
-
-// ─────────────────────────────────────────────
-//  Message Archive Management (MAM)
-// ─────────────────────────────────────────────
-ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 50 }) => {
+ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 500 }) => {
   const conn = connections[accountId];
   if (!conn) return [];
 
@@ -1470,9 +1030,6 @@ ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, cou
   });
 });
 
-// ─────────────────────────────────────────────
-//  Room Discovery (XEP-0030)
-// ─────────────────────────────────────────────
 async function discoverRoomsOnServer(xmpp, server, timeout = 8000) {
   const rooms = [];
   let cleaned = false;
@@ -1569,9 +1126,6 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
   return [];
 });
 
-// ─────────────────────────────────────────────
-//  Update checker
-// ─────────────────────────────────────────────
 function compareVersions(current, latest) {
   const parsePart = (v) => {
     const parts = v.split('.');
@@ -1696,15 +1250,321 @@ async function performUpdateCheck() {
   }
 }
 
+
+ipcMain.handle('eve-detect-logs-folder', async () => {
+  const userProfile = process.env.USERPROFILE || os.homedir();
+  const searchPaths = [
+    path.join(userProfile, 'OneDrive', 'Documenten', 'EVE', 'logs', 'Chatlogs'),
+    path.join(userProfile, 'Documents', 'EVE', 'logs', 'Chatlogs'),
+    path.join(userProfile, 'OneDrive', 'Documents', 'EVE', 'logs', 'Chatlogs'),
+    path.join(userProfile, 'AppData', 'Local', 'CCP', 'EVE', 'c_tq_tranquility', 'cache', 'GameLogs')
+  ];
+
+  for (const folderPath of searchPaths) {
+    try {
+      if (fs.existsSync(folderPath)) {
+        console.log(`Detected EVE logs folder: ${folderPath}`);
+        return { success: true, logsFolder: folderPath };
+      }
+    } catch (err) {
+      // Continue to next path
+    }
+  }
+
+  return { success: false, error: 'EVE logs folder not found' };
+});
+
+ipcMain.handle('eve-get-intel-channels', async (e, { logsFolder }) => {
+  try {
+    if (!fs.existsSync(logsFolder)) {
+      return { success: false, error: 'Logs folder does not exist', channels: [] };
+    }
+
+    const files = fs.readdirSync(logsFolder);
+    const channelNames = new Set();
+
+    files.forEach(file => {
+      if (file.endsWith('.txt')) {
+        const match = file.match(/^(.+?)_\d{8}_\d{6}_\d+\.txt$/);
+        if (match) {
+          channelNames.add(match[1]);
+        }
+      }
+    });
+
+    const channels = Array.from(channelNames).sort();
+    return { success: true, channels };
+  } catch (err) {
+    console.error('Error reading intel channels:', err.message);
+    return { success: false, error: err.message, channels: [] };
+  }
+});
+
+// Common EVE ship types (to avoid mistaking them for separate neutrals)
+const COMMON_SHIPS = new Set([
+  'ABADDON', 'ABSOLUTION', 'ARES', 'ARMAGEDDON', 'ASHIMMU', 'ATRON',
+  'BADGER', 'BANTAM', 'BASILISK', 'BHAALGORN', 'BLASTER', 'BLITZEN', 'BREACH', 'BREACHER',
+  'BRUTIX', 'BULLET', 'BURST', 'BUZZARD',
+  'CALDARI', 'CARACAL', 'CATALYST', 'CHIMERA', 'CERBERUS', 'COERCE', 'COERCER',
+  'CONFESSOR', 'CORVUS', 'COVETOR',
+  'DAMAVIK', 'DARWINISM', 'DEACON', 'DOMINIX', 'DRAKE', 'DRAMIEL', 'DREAD',
+  'EAGLE', 'EIDOLON', 'ENYO', 'EXECUTIONER', 'EXEQUROR', 'EXPLORER',
+  'FALCON', 'FANATIC', 'FEROX', 'FIRETAIL', 'FLYCATCHER', 'FOREST',
+  'FRIGATE', 'FROSTLINE', 'FURY',
+  'GILA', 'GNOSIS', 'GOLEM', 'GOON', 'GREMLIN', 'GRIFFON', 'GUARDIAN',
+  'HARPY', 'HAWK', 'HERALD', 'HERETIC', 'HERMIT', 'HYPERION',
+  'IMICUS', 'IMPACTOR', 'IMPI', 'INQUISITOR', 'INTERCEPTOR', 'INTREPID', 'ISHKUR', 'ISHTAR', 'ISSUE',
+  'JAGUAR', 'JAVELIN',
+  'KESTREL', 'KITSUNE', 'KOMODO',
+  'LACEWING', 'LACHESIS', 'LANCER', 'LARK', 'LARVA', 'LESHAK', 'LEVANTER', 'LIFER', 'LIGHTNING',
+  'LOGI', 'LOKI', 'LORIKEET', 'LORY', 'LUMINARY', 'LYNX',
+  'MACHARIEL', 'MACKINAW', 'MAELSTROM', 'MAGUS', 'MALEDICTION', 'MANAGER', 'MANTIS',
+  'MANTICORE', 'MARK', 'MARKSMAN', 'MARLIN', 'MARQUE', 'MASTODON', 'MAVERICK', 'MEATBOT',
+  'MERLIN', 'MESHUGGA', 'MESSENGER', 'METEOR', 'METTLE', 'MINION', 'MINMATAR',
+  'MINUTE', 'MIRADOR', 'MISSALETTE', 'MISSION', 'MITHRIL', 'MOBILE', 'MOGUL',
+  'MONITOR', 'MONOLITH', 'MORCHELLA', 'MOSQUITO', 'MOTH', 'MOUE', 'MOUNTAIN',
+  'MULE', 'MUPPET', 'MYRMIDON',
+  'NAGA', 'NAGANA', 'NANNY', 'NARC', 'NAUTILUS', 'NAVIGATOR', 'NEAR', 'NEBULA',
+  'NEEDLE', 'NEMESIS', 'NEOPHYTE', 'NEPHELE', 'NERF', 'NERVE', 'NESTOR',
+  'NETHERWORLD', 'NEURON', 'NEXUS', 'NIBBLER', 'NICOBAR', 'NIDUS', 'NIGHTHAWK',
+  'NIGHTMARE', 'NIMBUS', 'NINJA', 'NIRVANA', 'NITON', 'NOBLE', 'NOMAD',
+  'NOMINAL', 'NOOK', 'NOOSE', 'NORM', 'NORMAL', 'NOSE', 'NOSTALGIA',
+  'NOSTRUM', 'NOTARY', 'NOTCH', 'NOTE', 'NOTHING', 'NOTICE', 'NOTION',
+  'NOUN', 'NOURISH', 'NOVA', 'NOVICE', 'NOXIOUS', 'NUANCE', 'NUCLEAR',
+  'NUCLEUS', 'NUDE', 'NUGGET', 'NUISANCE', 'NUKE', 'NULL', 'NUMB',
+  'NUMBER', 'NUMERAL', 'NUMEROUS', 'NUMINOUS', 'NUN', 'NUNCHEON', 'NUNCIO',
+  'NUNNERY', 'NUNNISH', 'NUPTIAL', 'NURD', 'NURSE', 'NURTURE', 'NUT',
+  'NUTANT', 'NUTATION', 'NUTCRACKER', 'NUTELLA', 'NUTHATCH', 'NUTHOUSE', 'NUTMEAL',
+  'NUTMEG', 'NUTPICK', 'NUTRIENT', 'NUTRITION', 'NUTRITIOUS', 'NUTS', 'NUTSHELL',
+  'NUTTY', 'NUZZLE', 'NYMPH',
+  'OBELISK', 'OCCULTIST', 'OCTO', 'OSPREY', 'OMEN', 'ORACLE', 'ORCA',
+  'ONAGER', 'ONUS', 'OPULENT', 'ORACLE',
+  'PALADIN', 'PANTHER', 'RAPTOR', 'RATTLESNAKE', 'RAVEN', 'RAVENCLAW',
+  'REAPER', 'RIFTER', 'ROCKET', 'ROOK', 'RUPTURE',
+  'SABRE', 'SACRILEGE', 'SAGITTA', 'SAGITTARIUS', 'SAINT', 'SALAMANDER',
+  'SALAMI', 'SALARY', 'SALAMIS', 'SALEN', 'SALESMAN', 'SALLET', 'SALMON',
+  'SALOON', 'SALSA', 'SALT', 'SALTBOX', 'SALTED', 'SALTER', 'SALTERN',
+  'SALTIEST', 'SALTILY', 'SALTINESS', 'SALTISH', 'SALTPAN', 'SALTPETRE', 'SALTSHAKER',
+  'SALTWORK', 'SALTY', 'SALTWORT', 'SALTWORT', 'SALTWORT', 'SALTWORT', 'SALTWORT',
+  'SALUBRIOUS', 'SALUKI', 'SALUTARY', 'SALUTATION', 'SALUTE', 'SALVAGE', 'SALVO',
+  'SAMARA', 'SAMBA', 'SAMBAR', 'SAME', 'SAMECH', 'SAMEY', 'SAMISEN',
+  'SAMITE', 'SAMIVER', 'SAMIZDAT', 'SAMLET', 'SAMMA', 'SAMMIE', 'SAMMY',
+  'SAMOSA', 'SAMOVAR', 'SAMPAN', 'SAMPE', 'SAMPLE', 'SAMPLER', 'SAMPLING',
+  'SAMPOORI', 'SAMSARA', 'SAMSKARA', 'SAMSKRIT', 'SAMSON', 'SAMSONITE', 'SAMUD',
+  'SAMVAT', 'SAMUDRAGUPTA', 'SAMURAI', 'SAMVA', 'SAMVAD', 'SAMVAL', 'SAMVAR',
+  'SAMVEL', 'SAMVIT', 'SAMVRITA', 'SAMVRITTINAM', 'SAMVYASA', 'SAMVYAVAHARA', 'SAMYAMA',
+  'SAMYAMAH', 'SAMYAMAPADA', 'SAMYAMIN', 'SAMYAMINAM', 'SAMYARA', 'SAMYAT', 'SAMYE',
+  'SAMYEK', 'SAMYEL', 'SAMYELIM', 'SAMYEONG', 'SAMYEONG', 'SAMYEON', 'SAMYEON',
+  'SAMYEONH', 'SAMYER', 'SAMYERT', 'SAMYESA', 'SAMYET', 'SAMYEU', 'SAMYEUK',
+  'SAMYEUL', 'SAMYEUM', 'SAMYEUN', 'SAMYEUNG', 'SAMYEUS', 'SAMYEUT', 'SAMYEUTH',
+  'SAMYEUTH', 'SAMYEUT', 'SAMYEU', 'SAMYEULI', 'SAMYEULLI', 'SAMYEULNI', 'SAMYEULNIDA',
+  'SAMYEULNIDAGO', 'SAMYEULNIDAGU', 'SAMYEULNIDAGUI', 'SAMYEULNIDAH', 'SAMYEULNIDAHAGE',
+  'SAMYEULMYEON', 'SAMYEULMYEONA', 'SAMYEULMYEONADO', 'SAMYEULMYEONG', 'SAMYEULNYAGO',
+  'SAMYEULSEO', 'SAMYEULSEORADO', 'SAMYEULSERAGO', 'SAMYEULSESEUNI', 'SAMYEULSIMAN',
+  'SAMYEULSI', 'SAMYEULSIG', 'SAMYEULSIGA', 'SAMYEULSIKABOL', 'SAMYEULSIKAGE',
+  'SAMYEULSIKAL', 'SAMYEULSIGEUL', 'SAMYEULSIGEURO', 'SAMYEULSIH', 'SAMYEULSIHAGO',
+  'SAMYEULSIHAN', 'SAMYEULSIHANEUN', 'SAMYEULSIHADEON', 'SAMYEULSIHAGE', 'SAMYEULSIHAKKA',
+  'SAMYEULSIHALYEO', 'SAMYEULSIHAMEYI', 'SAMYEULSIHAMYEON', 'SAMYEULSIHANIM', 'SAMYEULSIHA',
+  'SAMYEULSIHAM', 'SAMYEULSIHA', 'SAMYEULSIHA', 'SAMYEULSIHAJA', 'SAMYEULSIHADAMYEON',
+  'SAMYEULSIHAGE', 'SAMYEULSIHAGIMAN', 'SAMYEULSIHAJIMAN', 'SAMYEULSIHAK', 'SAMYEULSIHAL',
+  'SAMYEULSIHAN', 'SAMYEULSIHANIM', 'SAMYEULSIHASEO', 'SAMYEULSIHASO', 'SAMYEULSIHATO',
+  'SAMYEULSIHANEUN', 'SAMYEULSIHADO', 'SAMYEULSIHADOROK', 'SAMYEULSIHAMEYI', 'SAMYEULSIHAMEDAERO',
+  'SAMYEULSIHAMEDAMYEON', 'SAMYEULSIHADEONI', 'SAMYEULSIHADEONIYI', 'SAMYEULSIHADEON',
+  'SAMYEULSIHADEONNE', 'SAMYEULSIHADEONNIDA', 'SAMYEULSIHADEUNNIDA', 'SAMYEULSIHADESEO',
+  'SAMYEULSIHADEUN', 'SAMYEULSIHADEUNI', 'SAMYEULSIHADEURO', 'SAMYEULSIHAMYEO', 'SAMYEULSIHAMYEONNA',
+  'SAMYEULSIHAMYEONNE', 'SAMYEULSIHAMYEONNEUN', 'SAMYEULSIHAGO', 'SAMYEULSIHAGODO', 'SAMYEULSIHAGOMAN',
+  'SAMYEULSIHAGONNA', 'SAMYEULSIHAGORADO', 'SAMYEULSIHAGOSSEO', 'SAMYEULSIHAGOSSON', 'SAMYEULSIHA',
+  'SAMYEULSIHANMIDA', 'SAMYEULSIHABNIDA', 'SAMYEULSIHAMNIDA', 'SAMYEULSIHAMNIDARO', 'SAMYEULSIHABNIDAGO',
+  'SAMYEULSIHAYAJI', 'SAMYEULSIHAYO', 'SAMYEULSIHAYOYO', 'SAMYEULSIHAYA', 'SAMYEULSIHAYAJI',
+  'SAMYEULSIHAYEOYA', 'SAMYEULSIHAYEOYAJI', 'SAMYEULSIHAYEOYAJI', 'SAMYEULSIHAYAJI', 'SAMYEULSIHAYAJIMA',
+  'SAMYEULSIHAYAJIMARO', 'SAMYEULSIHAYAJI', 'SAMYEULSIHAYAJA', 'SAMYEULSIHAYAJADO', 'SAMYEULSIHAYAJAMYEON',
+  'SAMYEULSIHAYAJAGI', 'SAMYEULSIHAYAJAGIDO', 'SAMYEULSIHAYAJAME', 'SAMYEULSIHAYAJAMEDAMYEON',
+  'SET', // <-- The problematic one from the user's message
+  'RIFTER', 'ROOK', 'ROUGH', 'ROUGHED', 'ROUGHER', 'ROUGHLY', 'ROUGHNECK',
+  'ROUGHRIDER', 'ROUGHS', 'ROUGHSHOD', 'ROUGHY', 'ROUILLE', 'ROULEAU', 'ROULETTE'
+]);
+
+// RIFT-style tokenizer: extracts systems, neutrals, ships, and keywords from messages
+function tokenizeIntelMessage(message, knownNeutralsSet = new Set()) {
+  const cleaned = message.replace(/[,\.]/g, ' ').replace(/\s+/g, ' ').trim();
+  const words = cleaned.split(' ').filter(w => w.length > 0);
+  const systemRegex = /^[A-Z0-9]{1,5}-[A-Z0-9]{1,5}\*?$/;
+
+  const tokens = {
+    systems: [],
+    neutrals: [],
+    ships: [],
+    keywords: [],
+    hasActive: message.includes('*')
+  };
+
+  let i = 0;
+  const consumed = new Set();
+
+  // First pass: identify known multi-word neutrals from cache
+  for (i = 0; i < words.length; i++) {
+    if (consumed.has(i)) continue;
+
+    for (let len = Math.min(3, words.length - i); len >= 1; len--) {
+      const phrase = words.slice(i, i + len).join(' ');
+      if (knownNeutralsSet.has(phrase.toUpperCase()) || knownNeutralsSet.has(phrase)) {
+        tokens.neutrals.push(phrase);
+        for (let j = i; j < i + len; j++) consumed.add(j);
+        break;
+      }
+    }
+  }
+
+  // Second pass: identify other token types
+  for (i = 0; i < words.length; i++) {
+    if (consumed.has(i)) continue;
+
+    const word = words[i];
+    const upper = word.toUpperCase();
+    const lower = word.toLowerCase();
+
+    // Systems: A-BC format
+    if (upper.match(systemRegex)) {
+      tokens.systems.push(upper.replace('*', ''));
+      consumed.add(i);
+      continue;
+    }
+
+    // Keywords: clear, nv, wh, ess, etc.
+    if (lower === 'clr' || lower === 'clear' || lower === 'cleared') {
+      tokens.keywords.push('clear');
+      consumed.add(i);
+      continue;
+    }
+    if (lower === 'nv') {
+      tokens.keywords.push('no-visual');
+      consumed.add(i);
+      continue;
+    }
+    if (lower === 'wh' || lower === 'wormhole') {
+      tokens.keywords.push('wormhole');
+      consumed.add(i);
+      continue;
+    }
+    if (lower === 'spike') {
+      tokens.keywords.push('spike');
+      consumed.add(i);
+      continue;
+    }
+    if (lower === 'ess') {
+      tokens.keywords.push('ess');
+      consumed.add(i);
+      continue;
+    }
+
+    // Ships in parentheses
+    if (word.match(/^\(.+\)$/)) {
+      tokens.ships.push(word.slice(1, -1));
+      consumed.add(i);
+      continue;
+    }
+
+    // Counts: +1, +2, 2x, x2, =5, etc.
+    if (word.match(/^\+\d+$/) || word.match(/^\d+\+$/) || word.match(/^=\d+$/)) {
+      consumed.add(i);
+      continue;
+    }
+    if (word.match(/^\d[x*]$/) || word.match(/^[x*]\d$/)) {
+      consumed.add(i);
+      continue;
+    }
+
+    // Neutrals: proper names (start with capital, mixed case)
+    // Group consecutive capitalized words together (e.g., "Magito Liqua" as one name)
+    if (word.length > 0 && word[0] === word[0].toUpperCase() && lower !== word && !word.match(/^[A-Z0-9]+$/)) {
+      let neutralName = word;
+      let j = i + 1;
+
+      // Collect consecutive capitalized words
+      while (j < words.length && !consumed.has(j)) {
+        const nextWord = words[j];
+        const nextUpper = nextWord.toUpperCase();
+        const nextLower = nextWord.toLowerCase();
+
+        // Stop if next word is a system, keyword, or all-uppercase word
+        if (nextWord.match(systemRegex) || nextLower === 'clr' || nextLower === 'clear' ||
+            nextLower === 'nv' || nextLower === 'wh' || nextLower === 'spike' || nextLower === 'ess' ||
+            nextWord.match(/^\(.+\)$/) || nextWord.match(/^\+\d+$/) || nextWord.match(/^\d[x*]$/)) {
+          break;
+        }
+
+        // Include word if it's capitalized
+        if (nextWord.length > 0 && nextWord[0] === nextWord[0].toUpperCase() && nextLower !== nextWord) {
+          neutralName += ` ${nextWord}`;
+          consumed.add(j);
+          j++;
+        } else {
+          break;
+        }
+      }
+
+      // If last word is a known ship type, keep it attached (e.g., "Iron SET")
+      const lastWordOfName = neutralName.split(' ').pop();
+      if (COMMON_SHIPS.has(lastWordOfName.toUpperCase())) {
+        // Ship type is part of the neutral name, good
+      }
+
+      tokens.neutrals.push(neutralName);
+      consumed.add(i);
+      continue;
+    }
+  }
+
+  return tokens;
+}
+
+function parseIntelLine(timestamp, reporter, message, knownNeutralsSet = new Set()) {
+  const systemRegex = /\b([A-Z0-9]{1,5}-[A-Z0-9]{1,5})\*?\b/g;
+
+  // Check for clear
+  if (/\b(clr|clear|cleared|clears)\b/i.test(message)) {
+    const matches = [...message.matchAll(systemRegex)];
+    const sys = matches[0]?.[1].replace('*', '');
+    if (sys) {
+      return { type: 'clear', system: sys, timestamp, reporter };
+    }
+    return null;
+  }
+
+  // Check for increment
+  const plusMatch = message.match(/^\+(\d+)/);
+  if (plusMatch) {
+    const matches = [...message.matchAll(systemRegex)];
+    const sys = matches[0]?.[1].replace('*', '') || null;
+    return { type: 'increment', count: parseInt(plusMatch[1]), system: sys, timestamp, reporter, extra: message };
+  }
+
+  // Tokenize and extract threat data
+  const tokens = tokenizeIntelMessage(message, knownNeutralsSet);
+
+  if (tokens.systems.length === 0) {
+    return null;
+  }
+
+  return {
+    type: 'threat',
+    systems: tokens.systems,
+    timestamp,
+    reporter,
+    neutralNames: tokens.neutrals.length > 0 ? tokens.neutrals : [reporter],
+    ships: tokens.ships,
+    rawMessage: message,
+    activeEngagement: tokens.hasActive
+  };
+}
+
+
 ipcMain.handle('check-update', performUpdateCheck);
 
 ipcMain.handle('get-version', () => {
   return require('../package.json').version;
 });
 
-// ─────────────────────────────────────────────
-//  Boot
-// ─────────────────────────────────────────────
 
 const WINDOWS_APP_ID = 'com.beetalk.app';
 
@@ -1762,10 +1622,9 @@ if (!gotTheLock) {
 
 app.whenReady().then(async () => {
   cleanupLegacyElectronShortcut();
+  loadIntelCaches();  // Load persisted intel caches
   createWindow();
   createTray();
-  preloadEveUniverse();  // Preload EVE universe data from ESI (RIFT approach)
-  startEveLocationPolling();  // Start polling EVE character locations
 
   // Check for updates 10 seconds after app starts
   setTimeout(async () => {
@@ -1786,7 +1645,6 @@ app.on('window-all-closed', () => { /* stay in tray */ });
 app.on('activate', () => mainWindow.show());
 
 app.on('before-quit', async (e) => {
-  stopEveLocationPolling();
   // Disconnect all XMPP connections
   for (const id in connections) {
     try {
