@@ -79,7 +79,7 @@
         "AppImage",
         "deb"
       ],
-      "icon": "assets/icon_3.png",
+      "icon": "assets/icon-linux.png",
       "category": "Network"
     }
   },

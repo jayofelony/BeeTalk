@@ -97,8 +97,8 @@ To build for macOS or Linux, use `npm run build:mac` or `npm run build:linux`. T
 
 ## Replacing the icon
 
-Put a 256×256 PNG at `assets/icon.png` and a 16×16 ICO at `assets/icon.ico`
-before building. The tray icon uses `assets/tray.png` (16×16 or 32×32 PNG).
+`assets/icon.png` is the source artwork. Run `npm run icons` to generate the
+Windows, macOS, Linux and tray icons from it.
 
 ## Project structure
 
@@ -111,7 +111,7 @@ BeeTalk/
 │   ├── app.js          # Renderer — UI, XMPP events, multi-account, rooms
 │   └── styles.css      # Light/dark theme
 ├── assets/
-│   ├── icon.png        # Window/taskbar icon
+│   ├── icon.png        # Source artwork for all icons (npm run icons)
 │   ├── icon.ico        # Windows icon
 │   ├── tray.png        # System tray icon
 │   └── emoticons/      # Emoticon packs

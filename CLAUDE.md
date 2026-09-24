@@ -30,10 +30,10 @@ npm run build         # All platforms (runs build:win, build:mac, build:linux, b
 
 ### Icon Management
 ```bash
-npm run icons     # Generate platform-specific icons from assets/icon.png
+npm run icons     # Generate all icons (ico, icns, Linux PNG, tray) from assets/icon.png
 ```
 
-Place a 256×256 PNG at `assets/icon.png` and run `npm run icons` before building. The tray icon uses `assets/tray.png`.
+`assets/icon.png` is the source artwork (high resolution, transparent; any aspect ratio, it is padded to square). Run `npm run icons` after changing it and commit the generated `icon.ico`, `icon.icns`, `icon-linux.png`, `tray.png` and `tray@2x.png`. The Linux icon must stay square at a standard size (512×512), or GNOME/KDE fall back to a generic icon.
 
 ## Architecture
 

@@ -99,7 +99,7 @@ function deletePassword(accountId) {
 function createWindow() {
   const windowIconPath = process.platform === 'win32'
     ? path.join(__dirname, '../assets/icon.ico')
-    : path.join(__dirname, '../assets/icon.png');
+    : path.join(__dirname, '../assets/icon-linux.png');
 
   mainWindow = new BrowserWindow({
     width: 1100,
