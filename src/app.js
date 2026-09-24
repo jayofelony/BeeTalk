@@ -568,6 +568,10 @@ function saveRoster(accountId, roster) {
 // ─────────────────────────────────────────────
 function renderAccountBar() {
   accountListEl.innerHTML = '';
+  // Single-account mode: only offer add-account buttons when no account exists
+  const addDisplay = state.accounts.length > 0 ? 'none' : '';
+  $('btn-add-account').style.display = addDisplay;
+  $('btn-welcome-add').style.display = addDisplay;
   const acct = getActiveAccount();
   if (!acct) return;
 
@@ -1290,6 +1294,8 @@ function switchAccount(id) {
 }
 
 function showAddAccountModal() {
+  // Single-account mode: only allow adding when no account exists yet
+  if (state.accounts.length > 0) return;
   showModal(`
     <div class="modal-title">Add GSF Jabber Account</div>
     <div id="modal-error"></div>
@@ -2550,8 +2556,8 @@ window.installUpdate = async (releaseUrl) => {
 //  Persistence
 // ─────────────────────────────────────────────
 function saveAccounts() {
-  const safe = state.accounts.map(({ id, username, password, server, port, displayName, color, eveCharacters }) =>
-    ({ id, username, password, server, port, displayName, color, eveCharacters: eveCharacters || [] })
+  const safe = state.accounts.map(({ id, username, password, server, port, displayName, color }) =>
+    ({ id, username, password, server, port, displayName, color })
   );
   ipcRenderer.send('save-accounts', safe);
 }
@@ -2653,7 +2659,7 @@ async function loadAndConnect() {
   const saved = await ipcRenderer.invoke('load-accounts');
   if (!saved?.length) return;
   saved.forEach(data => {
-    const acct = { ...data, status: 'offline', roster: {}, presence: 'available', jid: data.username + '@' + data.server, groups: {}, roomGroups: {}, eveCharacters: data.eveCharacters || [] };
+    const acct = { ...data, status: 'offline', roster: {}, presence: 'available', jid: data.username + '@' + data.server, groups: {}, roomGroups: {} };
 
     // Load saved roster from localStorage
     const savedRoster = getSavedRoster(acct.id);
@@ -3347,9 +3353,9 @@ window.showBrowseRoomsModal = showBrowseRoomsModal;
 $('btn-minimize').addEventListener('click', () => ipcRenderer.send('window-minimize'));
 $('btn-maximize').addEventListener('click', () => ipcRenderer.send('window-maximize'));
 $('btn-close').addEventListener('click', () => ipcRenderer.send('window-close'));
-// Multi-account functionality removed
-// $('btn-add-account').addEventListener('click', showAddAccountModal);
-// $('btn-welcome-add').addEventListener('click', showAddAccountModal);
+// Single-account mode: showAddAccountModal() is a no-op once an account exists
+$('btn-add-account').addEventListener('click', showAddAccountModal);
+$('btn-welcome-add').addEventListener('click', showAddAccountModal);
 
 $('btn-browse-rooms').addEventListener('click', showBrowseRoomsModal);
 $('btn-settings').addEventListener('click', showAccountSettingsModal);

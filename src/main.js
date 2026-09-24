@@ -1,12 +1,11 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, safeStorage } = require('electron');
 const path = require('path');
-const crypto = require('crypto');
-const http = require('http');
 const fs = require('fs');
-const os = require('os');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
-const keytar = require('keytar');
+// keytar is only used to migrate passwords saved by older versions; it is optional
+let keytar = null;
+try { keytar = require('keytar'); } catch {}
 
 const store = new Store();
 const KEYTAR_SERVICE = 'BeeTalk';
@@ -19,37 +18,25 @@ let unreadCount = 0;
 
 const connections    = {};  // accountId -> { _xmpp, account }
 const reconnectTimers = {}; // accountId -> timer handle
-const intelLastTimestamps = {}; // channelKey -> last timestamp we've seen
-let knownNeutrals = new Set();  // Cache of known neutral names for reliable parsing
-let validatedNeutrals = {};  // neutralName -> { valid: bool, characterId?: number, checked: timestamp }
-let intelPollingTimer = null;
-
-// Load and save intel caches
-function loadIntelCaches() {
-  const cached = store.get('intelCaches', { knownNeutrals: [], validatedNeutrals: {} });
-  knownNeutrals = new Set(cached.knownNeutrals || []);
-  validatedNeutrals = cached.validatedNeutrals || {};
-  console.log(`[Intel] Loaded ${knownNeutrals.size} known neutrals and ${Object.keys(validatedNeutrals).length} validation results from cache`);
-}
-
-function saveIntelCaches() {
-  store.set('intelCaches', {
-    knownNeutrals: Array.from(knownNeutrals),
-    validatedNeutrals
-  });
-}
 
 // Ensure OS-level app identity uses BeeTalk instead of the Electron default name.
 app.setName('BeeTalk');
 
 
-
 // ─────────────────────────────────────────────
-//  Credential Management (Keytar)
+//  Credential Management (safeStorage)
 // ─────────────────────────────────────────────
-async function savePassword(accountId, password) {
+// Passwords are encrypted with the OS keychain (DPAPI / Keychain / libsecret)
+// via safeStorage and stored as base64 in electron-store under `passwords`.
+function savePassword(accountId, password) {
+  if (!safeStorage.isEncryptionAvailable()) {
+    console.error(`Cannot save password for ${accountId}: OS encryption unavailable`);
+    return false;
+  }
   try {
-    await keytar.setPassword(KEYTAR_SERVICE, accountId, password);
+    const passwords = store.get('passwords', {});
+    passwords[accountId] = safeStorage.encryptString(password).toString('base64');
+    store.set('passwords', passwords);
     return true;
   } catch (err) {
     console.error(`Failed to save password for ${accountId}:`, err);
@@ -58,39 +45,46 @@ async function savePassword(accountId, password) {
 }
 
 async function getPassword(accountId) {
-  try {
-    let password = await keytar.getPassword(KEYTAR_SERVICE, accountId);
-
-    // Migrate from old service if not found in new service
-    if (!password) {
-      password = await keytar.getPassword(OLD_KEYTAR_SERVICE, accountId);
-      if (password) {
-        console.log(`Migrating password for account ${accountId} from ${OLD_KEYTAR_SERVICE} to ${KEYTAR_SERVICE}...`);
-        await savePassword(accountId, password);
-        // Clean up old service
-        try {
-          await keytar.deletePassword(OLD_KEYTAR_SERVICE, accountId);
-        } catch (err) {
-          console.warn(`Failed to clean up old keytar entry for ${accountId}:`, err.message);
-        }
-      }
+  const encrypted = store.get('passwords', {})[accountId];
+  if (encrypted) {
+    try {
+      return safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+    } catch (err) {
+      console.error(`Failed to decrypt password for ${accountId}:`, err);
+      return null;
     }
-
-    return password;
-  } catch (err) {
-    console.error(`Failed to retrieve password for ${accountId}:`, err);
-    return null;
   }
+  return migrateKeytarPassword(accountId);
 }
 
-async function deletePassword(accountId) {
-  try {
-    await keytar.deletePassword(KEYTAR_SERVICE, accountId);
-    return true;
-  } catch (err) {
-    console.error(`Failed to delete password for ${accountId}:`, err);
-    return false;
+// One-time migration from keytar (current and old 'Gabber' service names)
+async function migrateKeytarPassword(accountId) {
+  if (!keytar) return null;
+  for (const service of [KEYTAR_SERVICE, OLD_KEYTAR_SERVICE]) {
+    try {
+      const password = await keytar.getPassword(service, accountId);
+      if (!password) continue;
+      console.log(`Migrating password for account ${accountId} from keytar (${service}) to safeStorage...`);
+      if (savePassword(accountId, password)) {
+        try {
+          await keytar.deletePassword(service, accountId);
+        } catch (err) {
+          console.warn(`Failed to clean up keytar entry for ${accountId}:`, err.message);
+        }
+      }
+      return password;
+    } catch (err) {
+      console.warn(`Failed to read keytar entry for ${accountId}:`, err.message);
+    }
   }
+  return null;
+}
+
+function deletePassword(accountId) {
+  const passwords = store.get('passwords', {});
+  if (!(accountId in passwords)) return;
+  delete passwords[accountId];
+  store.set('passwords', passwords);
 }
 
 // ─────────────────────────────────────────────
@@ -222,12 +216,12 @@ async function connectXmpp(account) {
 
   await destroyConnection(id);
 
-  // Retrieve password securely from keytar
+  // Retrieve password from encrypted storage
   let password = await getPassword(id);
 
   if (!password) {
-    // Password not in keytar - this might be an old account or first connection after keytar migration
-    console.error(`No password found for account ${id} in keytar`);
+    // Password not stored - this might be an old account with a plaintext password
+    console.error(`No password found for account ${id}`);
     console.log(`Account details: username=${username}, server=${server}`);
 
     // Try getting it from store as fallback (old format)
@@ -235,9 +229,9 @@ async function connectXmpp(account) {
     const storedAccount = storedAccounts.find(acc => acc.id === id);
 
     if (storedAccount && storedAccount.password) {
-      console.log('Found password in old config format, migrating to keytar...');
+      console.log('Found password in old config format, migrating to safeStorage...');
       password = storedAccount.password;
-      await savePassword(id, password);
+      savePassword(id, password);
       // Remove from plaintext storage
       delete storedAccount.password;
       store.set('accounts', storedAccounts);
@@ -540,14 +534,20 @@ ipcMain.on('xmpp-leave-room', (e, { accountId, roomJid, nick }) => {
   c._xmpp.send(xml('presence', { to: `${roomJid}/${nick}`, type: 'unavailable' })).catch(() => {});
 });
 
-ipcMain.on('save-accounts', async (e, accounts) => {
-  // Save passwords to keytar and accounts (without passwords) to store
+ipcMain.on('save-accounts', (e, accounts) => {
+  // Save passwords encrypted and accounts (without passwords) to store.
+  // Kept synchronous so the password is stored before a following xmpp-connect is handled.
   for (const account of accounts) {
     if (account.password) {
-      await savePassword(account.id, account.password);
+      savePassword(account.id, account.password);
       // Don't store password in plaintext
       delete account.password;
     }
+  }
+  // Drop passwords of removed accounts
+  const ids = new Set(accounts.map(a => a.id));
+  for (const id of Object.keys(store.get('passwords', {}))) {
+    if (!ids.has(id)) deletePassword(id);
   }
   store.set('accounts', accounts);
 });
@@ -556,22 +556,26 @@ ipcMain.handle('load-accounts', async () => {
   let accounts = store.get('accounts', []);
   console.log(`Loaded ${accounts.length} accounts from store`);
 
-  // Migrate plaintext passwords from old config to keytar
+  // Migrate plaintext passwords from old config to safeStorage
   for (const account of accounts) {
     if (account.password) {
-      console.log(`Migrating password for account ${account.id} to keytar...`);
-      // Save to keytar
-      await savePassword(account.id, account.password);
+      console.log(`Migrating password for account ${account.id} to safeStorage...`);
+      savePassword(account.id, account.password);
       // Remove from plaintext storage
       delete account.password;
     }
   }
 
+  // Drop data left over from the removed EVE features
+  for (const account of accounts) delete account.eveCharacters;
+  store.delete('eveTokens');
+  store.delete('intelCaches');
+
   // Save the migrated accounts (without passwords)
   store.set('accounts', accounts);
   console.log('Account migration complete');
 
-  // Return accounts without passwords (they come from keytar)
+  // Return accounts without passwords (they stay in encrypted storage)
   return accounts.map(acc => ({ ...acc, password: '' }));
 });
 ipcMain.on('open-link', (e, url) => {
@@ -708,240 +712,6 @@ ipcMain.handle('load-emoticons', async () => {
     return {};
   }
 });
-
-// ─────────────────────────────────────────────
-function eveGenerateCodeVerifier() {
-  return crypto.randomBytes(32).toString('base64url');
-}
-
-function eveGenerateCodeChallenge(verifier) {
-  return crypto.createHash('sha256').update(verifier).digest('base64url');
-}
-
-function eveDecodeJwtPayload(token) {
-  try {
-    return JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf-8'));
-  } catch {
-    return null;
-  }
-}
-
-
-
-ipcMain.handle('eve-get-characters', async (e, { accountId }) => {
-  const accounts = store.get('accounts', []);
-  const account = accounts.find(a => a.id === accountId);
-  return account?.eveCharacters || [];
-});
-
-const eveUniverseCache = { regions: {}, systems: {}, stargates: {} };
-let eveUniverseLoaded = false;
-
-function parseJsonl(content) {
-  const lines = content.trim().split('\n');
-  return lines.map(line => JSON.parse(line));
-}
-
-async function preloadEveUniverse() {
-  if (eveUniverseLoaded) return;
-
-  try {
-    const fs = require('fs');
-    const assetsDir = path.join(__dirname, '../assets');
-    const sdeDir = path.join(assetsDir, 'eve-sde');
-
-    // Load SDE data files
-    const systemsData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapSolarSystems.jsonl'), 'utf8'));
-    const regionsData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapRegions.jsonl'), 'utf8'));
-    const stargatesData = parseJsonl(fs.readFileSync(path.join(sdeDir, 'mapStargates.jsonl'), 'utf8'));
-
-    // Load jump bridges
-    let jumpBridgesData = {};
-    try {
-      jumpBridgesData = JSON.parse(fs.readFileSync(path.join(assetsDir, 'jump-bridges.json'), 'utf8'));
-    } catch (err) {
-      // No jump bridges file found
-    }
-
-    // Build system index
-    const systemIndex = {};
-    for (const sys of systemsData) {
-      systemIndex[sys._key] = sys;
-      eveUniverseCache.systems[sys._key] = sys;
-    }
-
-    // Build stargate connections
-    const stargatesBySystem = {};
-    for (const gate of stargatesData) {
-      if (!stargatesBySystem[gate.solarSystemID]) {
-        stargatesBySystem[gate.solarSystemID] = [];
-      }
-      stargatesBySystem[gate.solarSystemID].push(gate);
-    }
-
-    // Build regions with systems and connections
-    for (const region of regionsData) {
-      const regionSystems = systemsData.filter(s => s.regionID === region._key);
-      const regionSystemIds = new Set(regionSystems.map(s => s._key));
-
-      // Build connections (stargates within this region AND to neighboring regions)
-      const connections = [];
-      const connectionSet = new Set();
-
-      for (const sys of regionSystems) {
-        const gates = stargatesBySystem[sys._key] || [];
-        for (const gate of gates) {
-          const destSysId = gate.destination.solarSystemID;
-          // Include both intra-region and inter-region connections
-          const pair = [Math.min(sys._key, destSysId), Math.max(sys._key, destSysId)].join(',');
-          if (!connectionSet.has(pair)) {
-            connectionSet.add(pair);
-            connections.push([sys._key, destSysId]);
-          }
-        }
-      }
-
-      // Build jump bridges for this region (including cross-region connections)
-      const jumpBridges = [];
-      let allSystemNameToId = {};
-      let allSystemsMap = {};
-
-      if (region._key === 10000006) {  // Wicked Creek
-        const regionJumpBridges = jumpBridgesData.wickedCreek || [];
-        const regionSystemIds = new Set(regionSystems.map(s => s._key));
-
-        // Build index for ALL systems globally
-        systemsData.forEach(s => {
-          const sysName = typeof s.name === 'object' ? (s.name.en || Object.values(s.name)[0]) : s.name;
-          allSystemNameToId[sysName] = s._key;
-          allSystemsMap[s._key] = s;
-        });
-
-        for (const [fromName, toName] of regionJumpBridges) {
-          const fromId = allSystemNameToId[fromName];
-          const toId = allSystemNameToId[toName];
-
-          if (fromId && toId) {
-            const fromRegionId = allSystemsMap[fromId]?.regionID;
-            const toRegionId = allSystemsMap[toId]?.regionID;
-
-            // Include if:
-            // 1. Both systems are in this region (intra-region)
-            // 2. From system is in this region (origin point)
-            // 3. To system is in this region (destination point)
-            if (fromRegionId === region._key || toRegionId === region._key) {
-              jumpBridges.push([fromId, toId]);
-            }
-          }
-        }
-      }
-
-      // Build system list using official position2D coordinates (matches in-game map orientation)
-      const systems = regionSystems.map(sys => {
-        const sysName = typeof sys.name === 'object' ? (sys.name.en || Object.values(sys.name)[0]) : sys.name;
-        return {
-          id: sys._key,
-          name: sysName,
-          x: sys.position2D?.x || 0,
-          y: sys.position2D?.y || 0,
-          z: 0,
-          security: sys.securityStatus || 0
-        };
-      });
-
-      const regionName = typeof region.name === 'object' ? (region.name.en || Object.values(region.name)[0]) : region.name;
-      eveUniverseCache.regions[region._key] = {
-        regionName,
-        regionId: region._key,
-        systems,
-        connections,
-        jumpBridges
-      };
-    }
-
-    eveUniverseLoaded = true;
-  } catch (err) {
-    // Fail silently
-  }
-}
-
-
-
-// Validate neutral name against zKillboard API
-async function validateNeutralName(name) {
-  if (!name || name.length === 0) return false;
-
-  // Check if we've already validated this name recently (cache for 24 hours)
-  const cached = validatedNeutrals[name];
-  if (cached && Date.now() - cached.checked < 24 * 60 * 60 * 1000) {
-    return cached.valid;
-  }
-
-  try {
-    const response = await fetch(`https://zkillboard.com/api/search/character/${encodeURIComponent(name)}/`);
-    if (!response.ok) {
-      validatedNeutrals[name] = { valid: false, checked: Date.now() };
-      saveIntelCaches();
-      return false;
-    }
-
-    const data = await response.json();
-    // zKillboard returns array of matches, check if exact name exists
-    const isValid = Array.isArray(data) && data.length > 0;
-    validatedNeutrals[name] = { valid: isValid, characterId: isValid ? data[0].character_id : null, checked: Date.now() };
-    console.log(`[Intel] Validated "${name}": ${isValid ? 'valid' : 'invalid'}`);
-    saveIntelCaches();
-    return isValid;
-  } catch (err) {
-    console.error(`[Intel] Validation error for "${name}":`, err.message);
-    validatedNeutrals[name] = { valid: false, checked: Date.now() };
-    saveIntelCaches();
-    return false;
-  }
-}
-
-
-
-
-
-
-
-
-
-ipcMain.handle('eve-get-autopilot-waypoint', async (e, { characterId }) => {
-  try {
-    const eveTokens = store.get('eveTokens', {});
-    const tokens = eveTokens[characterId];
-    if (!tokens) return { waypoint: null, error: 'no tokens' };
-
-    let resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/`, {
-      headers: { 'Authorization': `Bearer ${tokens.accessToken}` }
-    });
-
-    if (resp.status === 401) {
-      const refreshedTokens = await refreshEveToken(characterId, tokens);
-      if (!refreshedTokens) return { waypoint: null, error: 'token refresh failed' };
-
-      resp = await fetch(`https://esi.evetech.net/latest/ui/autopilot/waypoint/`, {
-        headers: { 'Authorization': `Bearer ${refreshedTokens.accessToken}` }
-      });
-    }
-
-    if (resp.status === 204) {
-      // 204 No Content means no waypoint is set
-      return { waypoint: null };
-    }
-
-    if (resp.ok) {
-      const data = await resp.json();
-      return { waypoint: data.destination_id || null };
-    }
-    return { waypoint: null, error: `HTTP ${resp.status}` };
-  } catch (err) {
-    return { waypoint: null, error: err.message };
-  }
-});
-
 
 ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 500 }) => {
   const conn = connections[accountId];
@@ -1251,314 +1021,6 @@ async function performUpdateCheck() {
 }
 
 
-ipcMain.handle('eve-detect-logs-folder', async () => {
-  const userProfile = process.env.USERPROFILE || os.homedir();
-  const searchPaths = [
-    path.join(userProfile, 'OneDrive', 'Documenten', 'EVE', 'logs', 'Chatlogs'),
-    path.join(userProfile, 'Documents', 'EVE', 'logs', 'Chatlogs'),
-    path.join(userProfile, 'OneDrive', 'Documents', 'EVE', 'logs', 'Chatlogs'),
-    path.join(userProfile, 'AppData', 'Local', 'CCP', 'EVE', 'c_tq_tranquility', 'cache', 'GameLogs')
-  ];
-
-  for (const folderPath of searchPaths) {
-    try {
-      if (fs.existsSync(folderPath)) {
-        console.log(`Detected EVE logs folder: ${folderPath}`);
-        return { success: true, logsFolder: folderPath };
-      }
-    } catch (err) {
-      // Continue to next path
-    }
-  }
-
-  return { success: false, error: 'EVE logs folder not found' };
-});
-
-ipcMain.handle('eve-get-intel-channels', async (e, { logsFolder }) => {
-  try {
-    if (!fs.existsSync(logsFolder)) {
-      return { success: false, error: 'Logs folder does not exist', channels: [] };
-    }
-
-    const files = fs.readdirSync(logsFolder);
-    const channelNames = new Set();
-
-    files.forEach(file => {
-      if (file.endsWith('.txt')) {
-        const match = file.match(/^(.+?)_\d{8}_\d{6}_\d+\.txt$/);
-        if (match) {
-          channelNames.add(match[1]);
-        }
-      }
-    });
-
-    const channels = Array.from(channelNames).sort();
-    return { success: true, channels };
-  } catch (err) {
-    console.error('Error reading intel channels:', err.message);
-    return { success: false, error: err.message, channels: [] };
-  }
-});
-
-// Common EVE ship types (to avoid mistaking them for separate neutrals)
-const COMMON_SHIPS = new Set([
-  'ABADDON', 'ABSOLUTION', 'ARES', 'ARMAGEDDON', 'ASHIMMU', 'ATRON',
-  'BADGER', 'BANTAM', 'BASILISK', 'BHAALGORN', 'BLASTER', 'BLITZEN', 'BREACH', 'BREACHER',
-  'BRUTIX', 'BULLET', 'BURST', 'BUZZARD',
-  'CALDARI', 'CARACAL', 'CATALYST', 'CHIMERA', 'CERBERUS', 'COERCE', 'COERCER',
-  'CONFESSOR', 'CORVUS', 'COVETOR',
-  'DAMAVIK', 'DARWINISM', 'DEACON', 'DOMINIX', 'DRAKE', 'DRAMIEL', 'DREAD',
-  'EAGLE', 'EIDOLON', 'ENYO', 'EXECUTIONER', 'EXEQUROR', 'EXPLORER',
-  'FALCON', 'FANATIC', 'FEROX', 'FIRETAIL', 'FLYCATCHER', 'FOREST',
-  'FRIGATE', 'FROSTLINE', 'FURY',
-  'GILA', 'GNOSIS', 'GOLEM', 'GOON', 'GREMLIN', 'GRIFFON', 'GUARDIAN',
-  'HARPY', 'HAWK', 'HERALD', 'HERETIC', 'HERMIT', 'HYPERION',
-  'IMICUS', 'IMPACTOR', 'IMPI', 'INQUISITOR', 'INTERCEPTOR', 'INTREPID', 'ISHKUR', 'ISHTAR', 'ISSUE',
-  'JAGUAR', 'JAVELIN',
-  'KESTREL', 'KITSUNE', 'KOMODO',
-  'LACEWING', 'LACHESIS', 'LANCER', 'LARK', 'LARVA', 'LESHAK', 'LEVANTER', 'LIFER', 'LIGHTNING',
-  'LOGI', 'LOKI', 'LORIKEET', 'LORY', 'LUMINARY', 'LYNX',
-  'MACHARIEL', 'MACKINAW', 'MAELSTROM', 'MAGUS', 'MALEDICTION', 'MANAGER', 'MANTIS',
-  'MANTICORE', 'MARK', 'MARKSMAN', 'MARLIN', 'MARQUE', 'MASTODON', 'MAVERICK', 'MEATBOT',
-  'MERLIN', 'MESHUGGA', 'MESSENGER', 'METEOR', 'METTLE', 'MINION', 'MINMATAR',
-  'MINUTE', 'MIRADOR', 'MISSALETTE', 'MISSION', 'MITHRIL', 'MOBILE', 'MOGUL',
-  'MONITOR', 'MONOLITH', 'MORCHELLA', 'MOSQUITO', 'MOTH', 'MOUE', 'MOUNTAIN',
-  'MULE', 'MUPPET', 'MYRMIDON',
-  'NAGA', 'NAGANA', 'NANNY', 'NARC', 'NAUTILUS', 'NAVIGATOR', 'NEAR', 'NEBULA',
-  'NEEDLE', 'NEMESIS', 'NEOPHYTE', 'NEPHELE', 'NERF', 'NERVE', 'NESTOR',
-  'NETHERWORLD', 'NEURON', 'NEXUS', 'NIBBLER', 'NICOBAR', 'NIDUS', 'NIGHTHAWK',
-  'NIGHTMARE', 'NIMBUS', 'NINJA', 'NIRVANA', 'NITON', 'NOBLE', 'NOMAD',
-  'NOMINAL', 'NOOK', 'NOOSE', 'NORM', 'NORMAL', 'NOSE', 'NOSTALGIA',
-  'NOSTRUM', 'NOTARY', 'NOTCH', 'NOTE', 'NOTHING', 'NOTICE', 'NOTION',
-  'NOUN', 'NOURISH', 'NOVA', 'NOVICE', 'NOXIOUS', 'NUANCE', 'NUCLEAR',
-  'NUCLEUS', 'NUDE', 'NUGGET', 'NUISANCE', 'NUKE', 'NULL', 'NUMB',
-  'NUMBER', 'NUMERAL', 'NUMEROUS', 'NUMINOUS', 'NUN', 'NUNCHEON', 'NUNCIO',
-  'NUNNERY', 'NUNNISH', 'NUPTIAL', 'NURD', 'NURSE', 'NURTURE', 'NUT',
-  'NUTANT', 'NUTATION', 'NUTCRACKER', 'NUTELLA', 'NUTHATCH', 'NUTHOUSE', 'NUTMEAL',
-  'NUTMEG', 'NUTPICK', 'NUTRIENT', 'NUTRITION', 'NUTRITIOUS', 'NUTS', 'NUTSHELL',
-  'NUTTY', 'NUZZLE', 'NYMPH',
-  'OBELISK', 'OCCULTIST', 'OCTO', 'OSPREY', 'OMEN', 'ORACLE', 'ORCA',
-  'ONAGER', 'ONUS', 'OPULENT', 'ORACLE',
-  'PALADIN', 'PANTHER', 'RAPTOR', 'RATTLESNAKE', 'RAVEN', 'RAVENCLAW',
-  'REAPER', 'RIFTER', 'ROCKET', 'ROOK', 'RUPTURE',
-  'SABRE', 'SACRILEGE', 'SAGITTA', 'SAGITTARIUS', 'SAINT', 'SALAMANDER',
-  'SALAMI', 'SALARY', 'SALAMIS', 'SALEN', 'SALESMAN', 'SALLET', 'SALMON',
-  'SALOON', 'SALSA', 'SALT', 'SALTBOX', 'SALTED', 'SALTER', 'SALTERN',
-  'SALTIEST', 'SALTILY', 'SALTINESS', 'SALTISH', 'SALTPAN', 'SALTPETRE', 'SALTSHAKER',
-  'SALTWORK', 'SALTY', 'SALTWORT', 'SALTWORT', 'SALTWORT', 'SALTWORT', 'SALTWORT',
-  'SALUBRIOUS', 'SALUKI', 'SALUTARY', 'SALUTATION', 'SALUTE', 'SALVAGE', 'SALVO',
-  'SAMARA', 'SAMBA', 'SAMBAR', 'SAME', 'SAMECH', 'SAMEY', 'SAMISEN',
-  'SAMITE', 'SAMIVER', 'SAMIZDAT', 'SAMLET', 'SAMMA', 'SAMMIE', 'SAMMY',
-  'SAMOSA', 'SAMOVAR', 'SAMPAN', 'SAMPE', 'SAMPLE', 'SAMPLER', 'SAMPLING',
-  'SAMPOORI', 'SAMSARA', 'SAMSKARA', 'SAMSKRIT', 'SAMSON', 'SAMSONITE', 'SAMUD',
-  'SAMVAT', 'SAMUDRAGUPTA', 'SAMURAI', 'SAMVA', 'SAMVAD', 'SAMVAL', 'SAMVAR',
-  'SAMVEL', 'SAMVIT', 'SAMVRITA', 'SAMVRITTINAM', 'SAMVYASA', 'SAMVYAVAHARA', 'SAMYAMA',
-  'SAMYAMAH', 'SAMYAMAPADA', 'SAMYAMIN', 'SAMYAMINAM', 'SAMYARA', 'SAMYAT', 'SAMYE',
-  'SAMYEK', 'SAMYEL', 'SAMYELIM', 'SAMYEONG', 'SAMYEONG', 'SAMYEON', 'SAMYEON',
-  'SAMYEONH', 'SAMYER', 'SAMYERT', 'SAMYESA', 'SAMYET', 'SAMYEU', 'SAMYEUK',
-  'SAMYEUL', 'SAMYEUM', 'SAMYEUN', 'SAMYEUNG', 'SAMYEUS', 'SAMYEUT', 'SAMYEUTH',
-  'SAMYEUTH', 'SAMYEUT', 'SAMYEU', 'SAMYEULI', 'SAMYEULLI', 'SAMYEULNI', 'SAMYEULNIDA',
-  'SAMYEULNIDAGO', 'SAMYEULNIDAGU', 'SAMYEULNIDAGUI', 'SAMYEULNIDAH', 'SAMYEULNIDAHAGE',
-  'SAMYEULMYEON', 'SAMYEULMYEONA', 'SAMYEULMYEONADO', 'SAMYEULMYEONG', 'SAMYEULNYAGO',
-  'SAMYEULSEO', 'SAMYEULSEORADO', 'SAMYEULSERAGO', 'SAMYEULSESEUNI', 'SAMYEULSIMAN',
-  'SAMYEULSI', 'SAMYEULSIG', 'SAMYEULSIGA', 'SAMYEULSIKABOL', 'SAMYEULSIKAGE',
-  'SAMYEULSIKAL', 'SAMYEULSIGEUL', 'SAMYEULSIGEURO', 'SAMYEULSIH', 'SAMYEULSIHAGO',
-  'SAMYEULSIHAN', 'SAMYEULSIHANEUN', 'SAMYEULSIHADEON', 'SAMYEULSIHAGE', 'SAMYEULSIHAKKA',
-  'SAMYEULSIHALYEO', 'SAMYEULSIHAMEYI', 'SAMYEULSIHAMYEON', 'SAMYEULSIHANIM', 'SAMYEULSIHA',
-  'SAMYEULSIHAM', 'SAMYEULSIHA', 'SAMYEULSIHA', 'SAMYEULSIHAJA', 'SAMYEULSIHADAMYEON',
-  'SAMYEULSIHAGE', 'SAMYEULSIHAGIMAN', 'SAMYEULSIHAJIMAN', 'SAMYEULSIHAK', 'SAMYEULSIHAL',
-  'SAMYEULSIHAN', 'SAMYEULSIHANIM', 'SAMYEULSIHASEO', 'SAMYEULSIHASO', 'SAMYEULSIHATO',
-  'SAMYEULSIHANEUN', 'SAMYEULSIHADO', 'SAMYEULSIHADOROK', 'SAMYEULSIHAMEYI', 'SAMYEULSIHAMEDAERO',
-  'SAMYEULSIHAMEDAMYEON', 'SAMYEULSIHADEONI', 'SAMYEULSIHADEONIYI', 'SAMYEULSIHADEON',
-  'SAMYEULSIHADEONNE', 'SAMYEULSIHADEONNIDA', 'SAMYEULSIHADEUNNIDA', 'SAMYEULSIHADESEO',
-  'SAMYEULSIHADEUN', 'SAMYEULSIHADEUNI', 'SAMYEULSIHADEURO', 'SAMYEULSIHAMYEO', 'SAMYEULSIHAMYEONNA',
-  'SAMYEULSIHAMYEONNE', 'SAMYEULSIHAMYEONNEUN', 'SAMYEULSIHAGO', 'SAMYEULSIHAGODO', 'SAMYEULSIHAGOMAN',
-  'SAMYEULSIHAGONNA', 'SAMYEULSIHAGORADO', 'SAMYEULSIHAGOSSEO', 'SAMYEULSIHAGOSSON', 'SAMYEULSIHA',
-  'SAMYEULSIHANMIDA', 'SAMYEULSIHABNIDA', 'SAMYEULSIHAMNIDA', 'SAMYEULSIHAMNIDARO', 'SAMYEULSIHABNIDAGO',
-  'SAMYEULSIHAYAJI', 'SAMYEULSIHAYO', 'SAMYEULSIHAYOYO', 'SAMYEULSIHAYA', 'SAMYEULSIHAYAJI',
-  'SAMYEULSIHAYEOYA', 'SAMYEULSIHAYEOYAJI', 'SAMYEULSIHAYEOYAJI', 'SAMYEULSIHAYAJI', 'SAMYEULSIHAYAJIMA',
-  'SAMYEULSIHAYAJIMARO', 'SAMYEULSIHAYAJI', 'SAMYEULSIHAYAJA', 'SAMYEULSIHAYAJADO', 'SAMYEULSIHAYAJAMYEON',
-  'SAMYEULSIHAYAJAGI', 'SAMYEULSIHAYAJAGIDO', 'SAMYEULSIHAYAJAME', 'SAMYEULSIHAYAJAMEDAMYEON',
-  'SET', // <-- The problematic one from the user's message
-  'RIFTER', 'ROOK', 'ROUGH', 'ROUGHED', 'ROUGHER', 'ROUGHLY', 'ROUGHNECK',
-  'ROUGHRIDER', 'ROUGHS', 'ROUGHSHOD', 'ROUGHY', 'ROUILLE', 'ROULEAU', 'ROULETTE'
-]);
-
-// RIFT-style tokenizer: extracts systems, neutrals, ships, and keywords from messages
-function tokenizeIntelMessage(message, knownNeutralsSet = new Set()) {
-  const cleaned = message.replace(/[,\.]/g, ' ').replace(/\s+/g, ' ').trim();
-  const words = cleaned.split(' ').filter(w => w.length > 0);
-  const systemRegex = /^[A-Z0-9]{1,5}-[A-Z0-9]{1,5}\*?$/;
-
-  const tokens = {
-    systems: [],
-    neutrals: [],
-    ships: [],
-    keywords: [],
-    hasActive: message.includes('*')
-  };
-
-  let i = 0;
-  const consumed = new Set();
-
-  // First pass: identify known multi-word neutrals from cache
-  for (i = 0; i < words.length; i++) {
-    if (consumed.has(i)) continue;
-
-    for (let len = Math.min(3, words.length - i); len >= 1; len--) {
-      const phrase = words.slice(i, i + len).join(' ');
-      if (knownNeutralsSet.has(phrase.toUpperCase()) || knownNeutralsSet.has(phrase)) {
-        tokens.neutrals.push(phrase);
-        for (let j = i; j < i + len; j++) consumed.add(j);
-        break;
-      }
-    }
-  }
-
-  // Second pass: identify other token types
-  for (i = 0; i < words.length; i++) {
-    if (consumed.has(i)) continue;
-
-    const word = words[i];
-    const upper = word.toUpperCase();
-    const lower = word.toLowerCase();
-
-    // Systems: A-BC format
-    if (upper.match(systemRegex)) {
-      tokens.systems.push(upper.replace('*', ''));
-      consumed.add(i);
-      continue;
-    }
-
-    // Keywords: clear, nv, wh, ess, etc.
-    if (lower === 'clr' || lower === 'clear' || lower === 'cleared') {
-      tokens.keywords.push('clear');
-      consumed.add(i);
-      continue;
-    }
-    if (lower === 'nv') {
-      tokens.keywords.push('no-visual');
-      consumed.add(i);
-      continue;
-    }
-    if (lower === 'wh' || lower === 'wormhole') {
-      tokens.keywords.push('wormhole');
-      consumed.add(i);
-      continue;
-    }
-    if (lower === 'spike') {
-      tokens.keywords.push('spike');
-      consumed.add(i);
-      continue;
-    }
-    if (lower === 'ess') {
-      tokens.keywords.push('ess');
-      consumed.add(i);
-      continue;
-    }
-
-    // Ships in parentheses
-    if (word.match(/^\(.+\)$/)) {
-      tokens.ships.push(word.slice(1, -1));
-      consumed.add(i);
-      continue;
-    }
-
-    // Counts: +1, +2, 2x, x2, =5, etc.
-    if (word.match(/^\+\d+$/) || word.match(/^\d+\+$/) || word.match(/^=\d+$/)) {
-      consumed.add(i);
-      continue;
-    }
-    if (word.match(/^\d[x*]$/) || word.match(/^[x*]\d$/)) {
-      consumed.add(i);
-      continue;
-    }
-
-    // Neutrals: proper names (start with capital, mixed case)
-    // Group consecutive capitalized words together (e.g., "Magito Liqua" as one name)
-    if (word.length > 0 && word[0] === word[0].toUpperCase() && lower !== word && !word.match(/^[A-Z0-9]+$/)) {
-      let neutralName = word;
-      let j = i + 1;
-
-      // Collect consecutive capitalized words
-      while (j < words.length && !consumed.has(j)) {
-        const nextWord = words[j];
-        const nextUpper = nextWord.toUpperCase();
-        const nextLower = nextWord.toLowerCase();
-
-        // Stop if next word is a system, keyword, or all-uppercase word
-        if (nextWord.match(systemRegex) || nextLower === 'clr' || nextLower === 'clear' ||
-            nextLower === 'nv' || nextLower === 'wh' || nextLower === 'spike' || nextLower === 'ess' ||
-            nextWord.match(/^\(.+\)$/) || nextWord.match(/^\+\d+$/) || nextWord.match(/^\d[x*]$/)) {
-          break;
-        }
-
-        // Include word if it's capitalized
-        if (nextWord.length > 0 && nextWord[0] === nextWord[0].toUpperCase() && nextLower !== nextWord) {
-          neutralName += ` ${nextWord}`;
-          consumed.add(j);
-          j++;
-        } else {
-          break;
-        }
-      }
-
-      // If last word is a known ship type, keep it attached (e.g., "Iron SET")
-      const lastWordOfName = neutralName.split(' ').pop();
-      if (COMMON_SHIPS.has(lastWordOfName.toUpperCase())) {
-        // Ship type is part of the neutral name, good
-      }
-
-      tokens.neutrals.push(neutralName);
-      consumed.add(i);
-      continue;
-    }
-  }
-
-  return tokens;
-}
-
-function parseIntelLine(timestamp, reporter, message, knownNeutralsSet = new Set()) {
-  const systemRegex = /\b([A-Z0-9]{1,5}-[A-Z0-9]{1,5})\*?\b/g;
-
-  // Check for clear
-  if (/\b(clr|clear|cleared|clears)\b/i.test(message)) {
-    const matches = [...message.matchAll(systemRegex)];
-    const sys = matches[0]?.[1].replace('*', '');
-    if (sys) {
-      return { type: 'clear', system: sys, timestamp, reporter };
-    }
-    return null;
-  }
-
-  // Check for increment
-  const plusMatch = message.match(/^\+(\d+)/);
-  if (plusMatch) {
-    const matches = [...message.matchAll(systemRegex)];
-    const sys = matches[0]?.[1].replace('*', '') || null;
-    return { type: 'increment', count: parseInt(plusMatch[1]), system: sys, timestamp, reporter, extra: message };
-  }
-
-  // Tokenize and extract threat data
-  const tokens = tokenizeIntelMessage(message, knownNeutralsSet);
-
-  if (tokens.systems.length === 0) {
-    return null;
-  }
-
-  return {
-    type: 'threat',
-    systems: tokens.systems,
-    timestamp,
-    reporter,
-    neutralNames: tokens.neutrals.length > 0 ? tokens.neutrals : [reporter],
-    ships: tokens.ships,
-    rawMessage: message,
-    activeEngagement: tokens.hasActive
-  };
-}
-
-
 ipcMain.handle('check-update', performUpdateCheck);
 
 ipcMain.handle('get-version', () => {
@@ -1622,7 +1084,6 @@ if (!gotTheLock) {
 
 app.whenReady().then(async () => {
   cleanupLegacyElectronShortcut();
-  loadIntelCaches();  // Load persisted intel caches
   createWindow();
   createTray();
 

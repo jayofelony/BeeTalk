@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-BeeTalk is an Electron-based XMPP chat client for Windows that supports multi-account connectivity, group chats (MUC), message history, and system tray integration. It connects to XMPP servers (primarily GSF Jabber). It also includes EVE Online integration with an interactive region map that tracks all linked EVE character locations.
+BeeTalk is an Electron-based XMPP chat client for Windows that supports multi-account connectivity, group chats (MUC), message history, and system tray integration. It connects to XMPP servers (primarily GSF Jabber).
 
 ## Development Commands
 
@@ -41,7 +41,7 @@ Place a 256×256 PNG at `assets/icon.png` and run `npm run icons` before buildin
 1. **Main Process** (`src/main.js`)
    - Electron app lifecycle, window creation, system tray
    - XMPP connection pool (one per account)
-   - Credential storage via keytar (system keychain)
+   - Credential storage via Electron `safeStorage` (OS-level encryption)
    - IPC handlers that the renderer calls
 
 2. **Preload Script** (`src/preload.js`)
@@ -82,64 +82,6 @@ Each account has its own XMPP client (`connections[accountId]._xmpp`). Accounts 
 - `xmpp-message`: New message received
 - `xmpp-room-users`: Participant list for a room
 - `xmpp-room-discovery`: Available rooms from server
-- `eve-character-linked`: Character successfully linked to XMPP account
-- `eve-location-update`: Character location changed (systemId, systemName, regionName)
-
-### EVE Online Integration
-
-The app can link EVE Online characters to XMPP accounts via OAuth2. When a character's location updates, it displays on an interactive regional map.
-
-**EVE OAuth Flow** (`src/main.js`):
-- User clicks "Link EVE Character"
-- App generates PKCE code verifier/challenge
-- Opens login.eveonline.com in browser
-- Receives authorization code via callback (port 7777)
-- Exchanges code for access/refresh tokens via `eve-link-character` IPC handler
-- Stores tokens in `electron-store` under `eveTokens[characterId]`
-- Stores character reference in account's `eveCharacters[]` array
-
-**EVE Map Canvas** (`src/app.js`):
-- 2D interactive map showing all systems in a region (from Static Data Export preload)
-- Uses official `position2D` coordinates from CCP's SDE (matches Dotlan/in-game map orientation)
-- Multi-character support: shows all linked characters' locations simultaneously
-- Focus on most recently updated character: highlighted with blue pulsing glow, auto-centers
-- Character selector dropdown to manually focus on a specific character
-- Hover tooltips show system name, security status, and character names
-- Pan with mouse drag, zoom with mouse wheel
-- All characters shown with orange glow; region stargate connections drawn as lines
-
-**EVE Map Functions**:
-- `eveMapLoadRegion(systemId)` — Looks up cached region data from preloaded SDE, returns instantly
-- `eveMapDraw()` — Renders canvas each frame: background, connections, systems, tooltips
-- `eveMapAnimate()` — requestAnimationFrame loop
-- `initEveMapCanvas()` — Canvas initialization, event handlers (drag, zoom, hover)
-- `renderEveMapPanel()` — Updates character selector dropdown and location label
-- `updateEveMapPanelVisibility()` — Shows/hides EVE map panel based on linked characters
-
-**Character Location Polling** (`fetchEveLocations()` in `src/main.js`):
-- Polls every 10 seconds for character location updates via ESI API
-- Uses OAuth tokens stored in `electron-store` to authenticate requests
-- Queries `https://esi.evetech.net/latest/characters/{id}/location/`
-- Also fetches system and region data to provide location context
-- Updates renderer via `eve-location-update` IPC event with `{ systemId, systemName, regionName }`
-- **Note:** EVE cache parsing was explored but determined impractical (CCP uses proprietary binary format requiring reverse-engineering)
-
-**EVE Data Flow**:
-1. Main process polls character locations via ESI every 10 seconds
-2. Sends `eve-location-update` when character location changes
-3. Renderer receives event, updates `eveLocationState[characterId]`
-4. Sets `eveTrackedCharacterId` to the most recently updated character
-5. Calls `eveMapLoadRegion(systemId)` to look up cached region data from SDE
-6. Canvas auto-centers on that system with blue pulsing indicator
-7. All other linked characters shown with orange glow on the map
-
-**Static Data Export (SDE) Integration**:
-- Pre-loaded on app startup via `preloadEveUniverse()` from `assets/eve-sde/`
-- Includes all regions, systems, stargates, and official position2D coordinates
-- JSONL files: mapSolarSystems.jsonl, mapRegions.jsonl, mapStargates.jsonl (~8.5 MB total)
-- Uses official CCP position2D instead of calculating from 3D coordinates
-- `eve-load-region-map` handler returns cached region data instantly
-- Returns: `{ regionName, regionId, currentSystemId, systems: [...], connections: [[sysA, sysB], ...] }`
 
 ### Message Rendering
 
@@ -148,9 +90,7 @@ Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`) to avoid UI jank whe
 ### Persistence
 
 - **Accounts & Rooms**: Stored in `electron-store` (JSON file on disk), loaded on app start
-- **Passwords**: Stored in system keychain via keytar, never written to disk as plaintext
-- **EVE Tokens**: Stored in `electron-store` under `eveTokens[characterId]` (access/refresh tokens + expiry)
-- **EVE Characters**: Stored in each account's `eveCharacters[]` array in the accounts store
+- **Passwords**: Encrypted with Electron `safeStorage` (DPAPI/Keychain/libsecret) and stored as base64 in `electron-store` under `passwords[accountId]`; never written as plaintext
 - **XMPP Server Connection**: GSF Jabber hardcoded in `src/app.js` line ~732; can be changed at startup
 
 ### Idle Detection & Auto-Away
@@ -167,7 +107,7 @@ Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`) to avoid UI jank whe
 2. Main process creates XMPP client, sets up event listeners, saves account to electron-store
 3. Main broadcasts `xmpp-status` with connection state
 4. Renderer updates account status dot (green = connected, red = disconnected)
-5. Main stores password in keytar; renderer never sees it
+5. Main stores password encrypted via `safeStorage`; it is never sent back to the renderer
 
 ### Message Flow in Rooms
 1. User types in message input, hits Enter
@@ -208,91 +148,7 @@ Light/dark theme is controlled by a CSS class on `<body>`. The theme choice is p
 ## Notes for Maintainers
 
 - Electron version is pinned to 41.2.0; check for security updates regularly
-- keytar dependency is optional (graceful fallback if unavailable on some systems)
+- keytar is an optional dependency used only to migrate passwords saved by older versions into `safeStorage`; the app runs without it
 - Reconnection logic uses exponential backoff timers; timers are stored in `reconnectTimers` map
 - MUC (Multi-User Chat) room join flow requires sending presence after joining; this is handled in main.js
 - Message Archive Management (MAM) queries for history happen on room join; they're paginated to avoid overload
-- **EVE OAuth**: Requires `EVE_CLIENT_ID` set in `src/main.js` (get from https://developers.eveonline.com/applications). Callback URL must be registered as `http://localhost:7777/callback`
-- **EVE Character Location**: Polled every 10 seconds via ESI API. Uses OAuth tokens for authentication. Official, reliable, no external dependencies.
-- **EVE Map**: Fetches live data from ESI API (https://esi.evetech.net/). System coordinates and stargate connections pulled on demand. No local caching of map data.
-- **EVE Token Storage**: Uses `electron-store` not keytar (keytar has size limits for large tokens). Tokens include expiry; refresh flow not yet implemented (tokens assumed valid for session duration).
-- **EVE Map Neighboring Systems Positioning**: Both the small map and fullscreen map must call `positionNeighboringSystemsOnMap()` / `eveMapPositionNeighboringSystems()` to reposition neighboring systems along connection lines for visual clarity. Both maps use the same system objects from `eveMap.systemIndex` for consistent positioning. Both maps fetch neighboring region connections explicitly and store them in their respective map objects (`eveMap.neighboringRegionConnections` and `fullscreenEveMap.neighboringRegionConnections`). The fullscreen map also updates the small map's connections to ensure consistency across map switches.
-- **EVE Intel Channel Parser**: Reads local EVE chat log files to extract intel reports. Auto-detects EVE log folder at standard locations (`%APPDATA%\CCP\EVE\`, `%LOCALAPPDATA%\CCP\EVE\`, or custom OneDrive paths). Parses messages like "PlayerName SystemName Ship" to extract threats and display on maps with color-coded age. Handles "+1"/"+N" increments, "clear" messages, and ship type detection. Intel markers appear on both small and fullscreen maps with 15-minute default timeout (configurable in settings).
-
-## EVE Online API & ESI Reference
-
-**ESI (EVE Swagger Interface)** is CCP's official RESTful API for EVE Online third-party development. 
-
-**Official Resources**:
-- API Explorer: https://developers.eveonline.com/api-explorer (interactive endpoint tester)
-- ESI Docs: https://developers.eveonline.com/docs/services/esi/overview/ (full documentation)
-- Base URL: `https://esi.evetech.net/latest/`
-- Issues/Feature Requests: https://github.com/esi/esi-issues
-
-### Authentication & Versioning
-
-**SSO Authentication**: Many endpoints require OAuth2 tokens from EVE's SSO (Single Sign-On). Public endpoints don't require authentication.
-
-**API Versioning**: Use `X-Compatibility-Date` header (ISO format: YYYY-MM-DD) to pin API behavior to a specific date. Changes roll out at 11:00 UTC daily.
-
-**Breaking vs Non-Breaking**:
-- **Requires new compat date**: New routes, required parameter changes, type changes, field removals
-- **Same compat date**: New optional parameters, new response fields, new headers
-
-Report issues at the esi-issues GitHub repository.
-
-### Character Location & Navigation
-
-- **GET `/characters/{id}/location/`** — Current system, station, and structure for a character (requires auth)
-  - Returns: `solar_system_id`, `station_id`, `structure_id`
-  - Used by: `fetchEveLocations()` in main.js (polled every 10 seconds)
-  - Auth: Character OAuth token required
-  - Rate limit: 1 request/second per character
-
-- **GET `/universe/systems/{id}/`** — System metadata: name, security, coords, constellation
-  - Returns: `name`, `security_status`, `sun_id`, `position: {x, y, z}`, `constellation_id`
-  - Used for: Populating system names and security in map
-  - Auth: Public (no token required)
-
-- **GET `/universe/regions/{id}/`** — Region metadata: name, description
-  - Returns: `name`, `region_id`, `constellations[]`
-  - Used for: Displaying region names on map labels
-  - Auth: Public
-
-- **GET `/universe/stargates/{id}/`** — Stargate metadata: destination system/stargate
-  - Returns: `name`, `position: {x, y, z}`, `destination: {stargate_id, system_id}`
-  - Used for: Building stargate connection graph (embedded in SDE)
-  - Auth: Public
-
-### Static Data Export (SDE)
-
-EVE's universe structure is pre-loaded from CCP's Static Data Export (JSONL files in `assets/eve-sde/`):
-- `mapSolarSystems.jsonl` — All systems: id, name, position (x, y), region_id, security
-- `mapRegions.jsonl` — All regions: id, name
-- `mapStargates.jsonl` — All stargates: id, position, destination stargate/system
-
-SDE data is authoritative for map rendering (no API calls needed). ESI is only called for:
-- Character location polling
-- System/region lookups when needed for context
-- OAuth token exchange for character linking
-
-### OAuth2 Flow (Character Linking)
-
-EVE uses OAuth2 with PKCE (Proof Key for Code Exchange):
-1. Generate `code_verifier` (43-128 chars) and `code_challenge` (SHA256 hash, base64url)
-2. Redirect to `https://login.eveonline.com/v2/oauth/authorize/?client_id={EVE_CLIENT_ID}&redirect_uri={callback}&response_type=code&code_challenge={challenge}&scope={scopes}`
-3. User logs in, grants permission
-4. Browser redirects to `http://localhost:7777/callback?code={auth_code}`
-5. Exchange code for tokens via `POST /oauth/token` with `code_verifier` in body
-6. Receive: `access_token` (expires ~20 min), `refresh_token` (1 month), `expires_in`
-7. Store in `electron-store` under `eveTokens[characterId]`
-
-**Scopes used**: `esi-location.read.v1` (location), `esi-characters.read_standings.v1` (optional)
-
-### Common Pitfalls
-
-- **Token Expiry**: Access tokens expire after ~1200 seconds. Implement refresh flow to request new token with `refresh_token` (not yet implemented; currently tokens assumed valid for session duration)
-- **Rate Limits**: ESI enforces per-endpoint rate limits (typically 1-100 req/s). Stagger requests, implement backoff
-- **CORS**: Browser-side requests to ESI may fail due to CORS. Use main process (Node.js) for API calls instead
-- **Caching**: Leverage SDE for static data; only query ESI for dynamic data (character location, orders, etc.)
-- **Error Handling**: ESI returns 400/401/403/404/420/500/503. Implement exponential backoff for 503 (service unavailable)
