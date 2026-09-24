@@ -100,9 +100,9 @@ Changes flow: main process → renderer via IPC events → state mutations → D
 The server is Openfire 5.0.2 (goonfleet.com): stream management (XEP-0198, resumable for 600 s), message carbons, ping, blocking, vCard/PEP, offline messages; no message archive (accounts or rooms), no file upload.
 
 - `src/lib/connection.js` (`watchConnection`) owns the lifecycle; `connectXmpp()` in main.js only wires callbacks. @xmpp/client reconnects by itself; the watcher backs off its delay (2 s doubling to 5 min), reports a drop once, and stops after an authentication failure (a wrong password retried endlessly could lock the account).
-- **Resumed sessions:** after a short drop the library resumes the XEP-0198 session and marks itself online *without emitting 'online'*. The watcher detects the server's `<resumed/>` and reports `online` with `resumed: true`. A resumed session keeps presence, roster, room membership and carbons, so the renderer does not rejoin rooms.
+- **Resumed sessions:** after a short drop the library resumes the XEP-0198 session and marks itself online *without emitting 'online'* (still so in @xmpp/client 0.14). The watcher listens for `xmpp.streamManagement`'s `resumed` event and reports `online` with `resumed: true`. A resumed session keeps presence, roster, room membership and carbons, so the renderer does not rejoin rooms. 0.14 also re-sends outgoing stanzas the server hadn't acknowledged.
 - **Keepalive:** a ping every 60 s; no answer within 15 s means a dead connection (e.g. after sleep), so the socket is destroyed and the library reconnects/resumes.
-- The password is only sent after STARTTLS (`tlsOnlyCredentials` in `src/lib/xmpp-helpers.js`); goonfleet.com offers only SASL PLAIN.
+- **Login:** @xmpp/client 0.14 (an ES module; `require()` works in Node 22+/Electron). The credentials callback is called as `(authenticate, mechanisms, fast, entity)` and must pick the mechanism: `tlsOnlyCredentials` (`src/lib/xmpp-helpers.js`) refuses unless `xmpp.isSecure()` (after STARTTLS), then uses the first offered mechanism that isn't ANONYMOUS. goonfleet.com offers only SASL PLAIN (no SASL2/FAST).
 - **Carbons** (XEP-0280) are enabled on each new session; `unwrapCarbon` (`src/lib/stanzas.js`) only trusts carbons from our own bare JID. "Sent" carbons reach the renderer as `xmpp-message` with `outgoing: true`.
 - **Typing** (XEP-0085, DMs only): incoming states arrive as `xmpp-chat-state`; outgoing states are only sent to peers that have sent us one, and chat messages carry `<active/>`.
 - Roster pushes are only accepted from our own account/server.
@@ -161,7 +161,7 @@ npm run test:main                 # starts the real app (main.js) and checks it 
 - Suites cover: security (script injection, CSP, inert sanitizing), accounts, rooms, messaging/notifications, history, emoticons.
 - Hidden windows pause `requestAnimationFrame`, so tests shouldn't depend on more than a few batches of `openChat` rendering.
 - **Boot smoke test** (`test/electron/main-smoke.js`): the renderer suites fake the main process, so this is what catches a broken `main.js`, e.g. a dependency upgrade that changes how a module loads (electron-store 9+ is ESM: `require('electron-store').default`).
-- **Dependabot**: `@xmpp/*` is 0.x, where minor releases can break the API; it gets separate PRs. 0.14 changes the connection API (login, status, resumption) and needs porting before it can be merged.
+- **Dependabot**: `@xmpp/*` is 0.x, where minor releases can break the API; it gets separate PRs. Before merging one, run `npm test` and check the connection tests (`test/node/connection.test.js` runs the real library against a fake server).
 - CI runs the tests on every push to `main` and on pull requests (`.github/workflows/test.yml`); release builds only start if they pass.
 
 - **Linux dev**: if `npm start` aborts with "The SUID sandbox helper binary was found, but is not configured correctly", run `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox` (or use `npx electron --no-sandbox .` for local testing only)

@@ -6,15 +6,15 @@
 // - After an authentication failure, callers should stop (a wrong password retried
 //   endlessly could lock the account)
 // - Stream management (XEP-0198): after a short drop the library may *resume* the
-//   session. It then marks itself online without emitting 'online', so we detect the
-//   server's <resumed/> reply ourselves.
+//   session. It then marks itself online without emitting 'online' (still true in
+//   @xmpp/client 0.14), so we listen for streamManagement's 'resumed' event.
 // - Keepalive: a ping that isn't answered in time means the connection is dead (e.g.
-//   after sleep); disconnecting lets the library reconnect and resume.
+//   after sleep); destroying the socket lets the library reconnect and resume. 0.14 has
+//   its own ack-based liveness check, but only while stream management is enabled, and
+//   it ends the socket gracefully instead of destroying it.
 
 const { xml } = require('@xmpp/client');
 const { isStreamError } = require('./xmpp-helpers');
-
-const SM = 'urn:xmpp:sm:3';
 
 // Close a dead connection right away. xmpp.disconnect() only ends the socket and waits
 // for it to close, which on a dead connection may never happen. After STARTTLS the
@@ -71,10 +71,8 @@ function watchConnection(xmpp, {
   }
 
   xmpp.on('online', () => online(false));
-  xmpp.on('nonza', el => {
-    // The library sets status 'online' right after this element; report once it has
-    if (el.is('resumed', SM)) setImmediate(() => { if (xmpp.status === 'online') online(true); });
-  });
+  // 'resumed' fires just before the library sets status 'online'; report once it has
+  xmpp.streamManagement?.on('resumed', () => setImmediate(() => { if (xmpp.status === 'online') online(true); }));
 
   xmpp.on('disconnect', () => {
     if (!isCurrent()) return;

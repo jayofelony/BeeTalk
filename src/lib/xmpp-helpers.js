@@ -1,7 +1,8 @@
 'use strict';
 // Main-process helpers without Electron dependencies, so they can be unit-tested with `node --test`.
 
-const tls = require('tls');
+const { randomUUID } = require('crypto');
+// @xmpp/client 0.14 is an ES module; Node (and Electron) can require() it
 const { xml } = require('@xmpp/client');
 
 // local@domain[/resource]. The resource may contain spaces: for room private
@@ -37,21 +38,29 @@ async function checkMamSupport(xmpp) {
   }
 }
 
+// True once the connection runs over TLS (after STARTTLS)
 function isEncrypted(xmpp) {
-  const s = xmpp.socket;
-  return s instanceof tls.TLSSocket || s?.socket instanceof tls.TLSSocket;
+  return xmpp?.isSecure?.() === true;
 }
 
 // SASL credentials callback for @xmpp/client that only sends the password once
 // STARTTLS succeeded, so a network attacker stripping STARTTLS can't read it.
+// (0.14 also refuses PLAIN on insecure connections itself; this is a second guard
+// that also covers every other mechanism.)
 // getXmpp: returns the client (it doesn't exist yet when the options are built).
+// Called by @xmpp/client 0.14 as (authenticate, mechanisms, fast, entity); we must pick
+// the mechanism: the first offered one the library supports, in its priority order
+// (SCRAM-SHA-1 before PLAIN), never ANONYMOUS.
 function tlsOnlyCredentials(getXmpp, creds, onRefused) {
-  return async (authenticate) => {
+  const userAgent = xml('user-agent', { id: randomUUID() });  // only used by SASL2 servers
+  return async (authenticate, mechanisms = []) => {
     if (!isEncrypted(getXmpp())) {
       if (onRefused) onRefused();
       throw new Error('TLS required');
     }
-    return authenticate(creds);
+    const mechanism = mechanisms.find(m => m !== 'ANONYMOUS');
+    if (!mechanism) throw new Error('No supported login mechanism offered by the server');
+    return authenticate(creds, mechanism, userAgent);
   };
 }
 

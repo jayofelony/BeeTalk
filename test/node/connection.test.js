@@ -42,7 +42,12 @@ function fakeServer({ answerPings = true, authFail = false } = {}) {
 }
 
 function connect(port, options = {}) {
-  const xmpp = client({ service: `xmpp://127.0.0.1:${port}`, domain: 'localhost', username: 'u', password: 'p' });
+  // The fake server is plain TCP; @xmpp/client 0.14 won't use PLAIN there on its own,
+  // so force it for this local test server only (src/main.js requires TLS).
+  const xmpp = client({
+    service: `xmpp://127.0.0.1:${port}`, domain: 'localhost',
+    credentials: authenticate => authenticate({ username: 'u', password: 'p' }, 'PLAIN')
+  });
   const events = [];
   const watcher = watchConnection(xmpp, {
     onOnline: ({ resumed }) => events.push(resumed ? 'online(resumed)' : 'online'),
