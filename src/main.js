@@ -217,6 +217,20 @@ async function destroyConnection(id) {
   try { await old.stop(); } catch {}
 }
 
+// The server message archive (XEP-0313) is optional; goonfleet.com has none.
+// Checked once per login so DM history isn't requested from a server that refuses it.
+async function checkMamSupport(xmpp) {
+  try {
+    const res = await xmpp.iqCaller.request(
+      xml('iq', { type: 'get', to: xmpp.jid.bare().toString() },
+        xml('query', { xmlns: 'http://jabber.org/protocol/disco#info' })
+      ), 10000);
+    return res.getChild('query').getChildren('feature').some(f => f.attrs.var === 'urn:xmpp:mam:2');
+  } catch {
+    return false;
+  }
+}
+
 function isEncrypted(xmpp) {
   const s = xmpp.socket;
   return s instanceof tls.TLSSocket || s?.socket instanceof tls.TLSSocket;
@@ -293,6 +307,7 @@ async function connectXmpp(account) {
     downReported = false;
     xmpp.reconnect.delay = RECONNECT_MIN_MS;
     send('xmpp-status', { id, status: 'online', jid: address.toString() });
+    if (connections[id]?._xmpp === xmpp) connections[id].mamSupported = checkMamSupport(xmpp);
     xmpp.send(xml('presence')).catch(() => {});
     xmpp.send(
       xml('iq', { type: 'get', id: 'roster1' },
@@ -765,7 +780,7 @@ ipcMain.handle('load-emoticons', async () => {
 // Latest DM history from the server archive (XEP-0313 MAM), oldest first
 ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 100 }) => {
   const conn = connections[accountId];
-  if (!conn || !isValidJid(withJid)) return [];
+  if (!conn || !isValidJid(withJid) || !(await conn.mamSupported)) return [];
 
   const xmpp = conn._xmpp;
   const myBare = xmpp.jid ? xmpp.jid.bare().toString() : '';
