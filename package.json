@@ -89,11 +89,11 @@
   "devDependencies": {
     "electron": "^44.4.5",
     "electron-builder": "^26.15.3",
-    "png-to-ico": "^3.0.1",
+    "png-to-ico": "^3.0.2",
     "sharp": "^0.35.4"
   },
   "dependencies": {
-    "@xmpp/client": "^0.13.0",
+    "@xmpp/client": "^0.14.0",
     "electron-store": "^8.1.0"
   },
   "overrides": {
