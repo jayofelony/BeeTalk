@@ -658,6 +658,20 @@ img[src$=".gif"] {
   image-rendering: auto;
 }
 
+/* Add contact field (left panel) */
+#new-contact-username {
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg2);
+  color: var(--text1);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+#new-contact-username:focus { border-color: var(--accent); }
+
 /* Chat history: load-older button and in-chat search */
 .load-older-btn {
   display: block;

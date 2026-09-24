@@ -1,9 +1,9 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, safeStorage } = require('electron');
 const path = require('path');
-const tls = require('tls');
 const fs = require('fs');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
+const { isValidJid, isValidMessageType, isStreamError, checkMamSupport, tlsOnlyCredentials, compareVersions } = require('./lib/xmpp-helpers');
 // keytar is only used to migrate passwords saved by older versions; it is optional
 let keytar = null;
 try { keytar = require('keytar'); } catch {}
@@ -181,19 +181,7 @@ function send(channel, ...args) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, ...args);
 }
 
-// ─────────────────────────────────────────────
-//  Validation Utilities
-// ─────────────────────────────────────────────
-
-function isValidJid(jid) {
-  return typeof jid === 'string' && /^[^\s@]+@[^\s@]+(?:\/[^\s]+)?$/.test(jid);
-}
-
-function isValidMessageType(type) {
-  const validTypes = ['chat', 'groupchat', 'headline', 'normal'];
-  return validTypes.includes(type);
-}
-
+// Validation and XMPP helpers live in ./lib/xmpp-helpers.js (unit-tested)
 function isDebugMode() {
   return process.env.DEBUG === 'true' || process.env.DEBUG_BEETALK === 'true';
 }
@@ -201,14 +189,6 @@ function isDebugMode() {
 // ─────────────────────────────────────────────
 //  XMPP connection management
 // ─────────────────────────────────────────────
-
-// Silently suppress errors we expect during teardown
-function isStreamError(err) {
-  const msg = err.message || String(err);
-  return msg.includes('write after end') ||
-         msg.includes('ERR_STREAM') ||
-         err.name === 'TimeoutError';
-}
 
 // Cleanly destroy an existing connection without triggering reconnect
 async function destroyConnection(id) {
@@ -218,25 +198,6 @@ async function destroyConnection(id) {
   try { old.reconnect.stop(); } catch {}
   try { old.removeAllListeners(); } catch {}
   try { await old.stop(); } catch {}
-}
-
-// The server message archive (XEP-0313) is optional; goonfleet.com has none.
-// Checked once per login so DM history isn't requested from a server that refuses it.
-async function checkMamSupport(xmpp) {
-  try {
-    const res = await xmpp.iqCaller.request(
-      xml('iq', { type: 'get', to: xmpp.jid.bare().toString() },
-        xml('query', { xmlns: 'http://jabber.org/protocol/disco#info' })
-      ), 10000);
-    return res.getChild('query').getChildren('feature').some(f => f.attrs.var === 'urn:xmpp:mam:2');
-  } catch {
-    return false;
-  }
-}
-
-function isEncrypted(xmpp) {
-  const s = xmpp.socket;
-  return s instanceof tls.TLSSocket || s?.socket instanceof tls.TLSSocket;
 }
 
 // @xmpp/client instances CANNOT be reused after stop(). Always create fresh.
@@ -281,14 +242,10 @@ async function connectXmpp(account) {
     domain:  server,
     // Called right before SASL: refuse to send the password unless STARTTLS succeeded,
     // so a network attacker stripping the STARTTLS offer can't read it.
-    credentials: async (authenticate) => {
-      if (!isEncrypted(xmpp)) {
-        send('xmpp-status', { id, status: 'error', error: 'Server connection is not encrypted; refusing to send password.' });
-        destroyConnection(id);
-        throw new Error('TLS required');
-      }
-      return authenticate({ username, password });
-    }
+    credentials: tlsOnlyCredentials(() => xmpp, { username, password }, () => {
+      send('xmpp-status', { id, status: 'error', error: 'Server connection is not encrypted; refusing to send password.' });
+      destroyConnection(id);
+    })
   });
 
   connections[id] = { _xmpp: xmpp, account };
@@ -942,22 +899,6 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
   return [];
 });
 
-function compareVersions(current, latest) {
-  const parsePart = (v) => {
-    const parts = v.split('.');
-    return parts.map(p => parseInt(p, 10) || 0);
-  };
-  const curr = parsePart(current);
-  const ltest = parsePart(latest);
-
-  for (let i = 0; i < Math.max(curr.length, ltest.length); i++) {
-    const c = curr[i] || 0;
-    const l = ltest[i] || 0;
-    if (l > c) return 1;  // update available
-    if (l < c) return -1; // current is newer
-  }
-  return 0; // same version
-}
 
 async function performUpdateCheck() {
   try {

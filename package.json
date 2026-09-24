@@ -13,7 +13,10 @@
     "build:win:docker": "bash scripts/build-win-docker.sh",
     "build:mac": "npm run icons && electron-builder --mac --publish never",
     "build:linux": "electron-builder --linux --publish never",
-    "pack": "electron-builder --dir"
+    "pack": "electron-builder --dir",
+    "test": "npm run test:node && npm run test:electron",
+    "test:node": "node --test \"test/node/**/*.test.js\"",
+    "test:electron": "electron --no-sandbox test/electron/run.js"
   },
   "build": {
     "appId": "com.beetalk.app",

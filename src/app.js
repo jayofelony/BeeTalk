@@ -3719,4 +3719,5 @@ if (newContactInput) {
   await loadEmoticons();
   await initHistory();
   await loadAndConnect();
+  document.body.dataset.ready = 'true';  // boot finished (used by the tests)
 })();
