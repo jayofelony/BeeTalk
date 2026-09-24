@@ -117,7 +117,7 @@ jobs:
             macos-builds/*.dmg
             windows-builds/*.exe
           draft: false
-          prerelease: true
+          prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

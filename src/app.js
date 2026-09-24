@@ -379,6 +379,7 @@ ipcRenderer.on('xmpp-room-subject', (e, { accountId, roomJid, subject }) => {
 
 ipcRenderer.on('app-focus', () => {
   state.appIsFocused = true;
+  if (state.activeChatKey) markChatAsRead(state.activeChatKey);
   // Reset all new message counters
   Object.values(state.chats).forEach(chat => {
     chat.newMessagesWhileUnfocused = 0;
@@ -425,7 +426,7 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed, o
     if (delayed && isDuplicateMessage(chat, msg)) return;
     pushMessage(key, msg);
     // Rooms are busy: only notify when someone mentions our nick
-    if (!delayed && !msg.me && myNick.length >= 3 && body.toLowerCase().includes(myNick.toLowerCase())) {
+    if (!delayed && !msg.me && mentionsMe(chat, body)) {
       notifyIfNeeded(key, `${chat.name} / ${nick}`, body);
     }
   } else {
@@ -592,6 +593,14 @@ function historySince(chat) {
   return last ? new Date(last.ts - 60 * 1000).toISOString() : undefined;
 }
 
+// Does a room message mention our nick? Whole word, case-insensitive (so "Jay" doesn't match "jaywalk")
+function mentionsMe(chat, text) {
+  const nick = (chat?.myNick || '').trim();
+  if (chat?.type !== 'room' || nick.length < 3) return false;
+  const escaped = nick.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}($|[^\\p{L}\\p{N}_])`, 'iu').test(text);
+}
+
 function notifyIfNeeded(key, title, body) {
   const acct = state.accounts.find(a => a.id === state.chats[key]?.accountId);
   if (state.appIsFocused || acct?.presence === 'dnd') return;
@@ -617,6 +626,11 @@ function pushMessage(key, msg) {
   
   chat.lastTs      = msg.ts;
   chat.lastPreview = (msg.me ? 'You: ' : '') + msg.text;
+
+  // Seen live in the open chat (window focused): it's read
+  if (state.activeChatKey === key && state.appIsFocused && msg.ts > (chat.lastReadTs || 0)) {
+    chat.lastReadTs = msg.ts;
+  }
 
   // Mark as unread only if not in active chat AND message is newer than last read
   if (state.activeChatKey !== key) {
@@ -1240,6 +1254,9 @@ function openChat(key, loadHistory = true, scrollTo = 'bottom') {
   chat.unread = 0;
 
   const keepFromBottom = messagesArea.scrollHeight - messagesArea.scrollTop;
+  // Messages after this were not seen yet: mark them with a "New messages" line
+  const lastRead = scrollTo === 'bottom' ? (chat.lastReadTs || 0) : 0;
+  let newDivider = null;
   messagesArea.innerHTML = '';
 
   // For rooms: limit displayed messages to avoid performance issues
@@ -1280,6 +1297,12 @@ function openChat(key, loadHistory = true, scrollTo = 'bottom') {
         d.className = 'day-divider'; d.textContent = day;
         messagesArea.appendChild(d);
       }
+      if (lastRead && !newDivider && !msg.me && msg.ts > lastRead) {
+        newDivider = document.createElement('div');
+        newDivider.className = 'new-divider';
+        newDivider.textContent = 'New messages';
+        messagesArea.appendChild(newDivider);
+      }
       appendMessage(msg, chat);
     }
     
@@ -1292,7 +1315,10 @@ function openChat(key, loadHistory = true, scrollTo = 'bottom') {
       // All messages rendered (appendMessage already added emoticons and links)
       requestAnimationFrame(() => {
         if (scrollTo === 'keep') messagesArea.scrollTop = messagesArea.scrollHeight - keepFromBottom;
-        else scrollToBottom();
+        else if (newDivider) {
+          // Start reading at the first new message
+          messagesArea.scrollTop += newDivider.getBoundingClientRect().top - messagesArea.getBoundingClientRect().top - 8;
+        } else scrollToBottom();
       });
     }
   }
@@ -1331,6 +1357,7 @@ function appendMessage(msg, chat) {
     
     applyEmoticons(bubble);
     linkifyUrls(bubble);
+    if (!msg.me && mentionsMe(chat, msg.text)) bubble.classList.add('mention');
     body.insertBefore(bubble, body.querySelector('.msg-time'));
     scrollToBottom();
     return;
@@ -1373,6 +1400,7 @@ function appendMessage(msg, chat) {
   
   applyEmoticons(bubble);
   linkifyUrls(bubble);
+  if (!msg.me && mentionsMe(chat, msg.text)) bubble.classList.add('mention');
   bubble.style.cursor = 'context-menu';
   bubble.addEventListener('contextmenu', function(e) {
     e.preventDefault();
