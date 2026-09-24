@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.16] - 2026-09-24
+
+### Changed
+- electron-store 11 (settings storage); existing settings load unchanged
+- png-to-ico 3.0.2 (icon generation at build time)
+- New automated check that the app actually starts, so a broken dependency upgrade can't pass CI
+
 ## [1.0.15] - 2026-09-24
 
 ### Fixed
