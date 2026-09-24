@@ -71,15 +71,19 @@ module.exports = async t => {
   t.equal(await page.js("state.chats['acct_1::carol@goonfleet.com'].messages.map(m => m.from + ':' + m.text)"),
     ['carol:from last week', 'tester:my old reply', 'carol:live one'], 'archived DM history merged in order without duplicates');
 
-  // Busy room: 1000 presences + 300 messages
+  // Busy room: 1000 presences + 300 messages must not rebuild the left panel per event
+  // (counted, not timed: CI machines vary too much for a time limit)
   await onlineInRoom(page, 'big@conference.goonfleet.com');
+  await page.js(`window.__renders = 0; { const orig = renderLeftPanel;
+    window.renderLeftPanel = function (...args) { window.__renders++; return orig.apply(this, args); }; } 0`);
   const start = Date.now();
   for (let i = 0; i < 1000; i++) page.send('xmpp-presence', { accountId: 'acct_1', from: `big@conference.goonfleet.com/pilot${i}`, type: 'available', show: 'available' });
   for (let i = 0; i < 300; i++) page.send('xmpp-message', { accountId: 'acct_1', from: `big@conference.goonfleet.com/pilot${i % 50}`, body: `msg ${i}`, type: 'groupchat', ts: Date.now() + i });
   await page.waitFor("state.chats[chatKey('acct_1','big@conference.goonfleet.com')].messages.length >= 300", 10000);
   await page.js('new Promise(r => requestAnimationFrame(() => r()))');
   const ms = Date.now() - start;
-  t.ok(ms < 5000, `busy room burst processed in ${ms} ms (limit 5000)`);
+  const renders = await page.js('window.__renders');
+  t.ok(renders < 100, `1300 events caused ${renders} left-panel renders (limit 100; was one per event), ${ms} ms`);
   t.equal(await page.js("document.querySelectorAll('#participants-panel .part-item').length"), 1000, 'all 1000 participants listed');
   t.equal(page.consoleErrors, [], 'no errors in the page console');
   page.close();
