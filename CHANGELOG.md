@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.0.14] - 2026-09-24
+
+### Changed
+- DM history is only requested from servers that keep a message archive. goonfleet.com doesn't, so older DMs (including Directorbot) can't be fetched from the server; BeeTalk keeps its own local history from first use
+
 ## [1.0.13] - 2026-09-24
 
 ### Changed
