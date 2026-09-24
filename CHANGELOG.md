@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.17] - 2026-09-24
+
+### Fixed
+- Losing the network (e.g. Wi-Fi off) wasn't noticed: the keepalive could hang on a dead connection. It now reacts within about 40 s at most
+- BeeTalk now reacts to network changes and waking from sleep right away: it shows "Disconnected" as soon as the network is gone and reconnects as soon as it's back, usually resuming the session with nothing missed
+
+### Changed
+- XMPP library @xmpp/client 0.14: messages sent during a short drop are re-sent after the connection is resumed instead of being lost
+- Connection events are logged (run `/opt/BeeTalk/beetalk` from a terminal to see `[conn]` lines)
+
 ## [1.0.16] - 2026-09-24
 
 ### Changed
