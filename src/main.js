@@ -124,7 +124,10 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', e => e.preventDefault());
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
-  mainWindow.once('ready-to-show', () => mainWindow.show());
+  // When started at login, stay in the tray (Windows passes --hidden, macOS reports it)
+  const startHidden = process.argv.includes('--hidden') ||
+    (process.platform === 'darwin' && app.getLoginItemSettings().wasOpenedAtLogin);
+  mainWindow.once('ready-to-show', () => { if (!startHidden) mainWindow.show(); });
 
   mainWindow.on('close', e => {
     if (!app.isQuitting) {
@@ -591,6 +594,8 @@ ipcMain.on('show-notification', (e, { title, body, chatKey }) => {
     if (typeof chatKey === 'string') send('open-chat', chatKey);
   });
   n.on('close', () => activeNotifications.delete(n));
+  // Unsigned macOS builds can't show notifications (Electron 43+ uses UNNotification)
+  n.on('failed', (e, error) => { activeNotifications.delete(n); console.warn('Notification failed:', error); });
   n.show();
 });
 
@@ -663,8 +668,8 @@ ipcMain.on('set-launch-on-startup', (e, { enabled }) => {
 
     app.setLoginItemSettings({
       openAtLogin: enabled,
-      openAsHidden: true,
-      path: app.getPath('exe')
+      path: app.getPath('exe'),
+      args: ['--hidden']  // Windows: start in the tray
     });
     console.log(`[App] Launch on startup: ${enabled ? 'enabled' : 'disabled'}`);
   } catch (err) {

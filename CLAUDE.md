@@ -138,6 +138,8 @@ Light/dark theme is a `data-theme` attribute on `<html>`, persisted in `localSto
 
 ## Notes for Maintainers
 
-- Electron version is pinned to 41.2.0; check for security updates regularly
+- Electron 44. Electron supports only the latest three major versions; Dependabot (`.github/dependabot.yml`) opens PRs for Electron, npm packages and CI actions. Since Electron 43, `npm install` no longer downloads the Electron binary; the first `npm start` / `npx electron` does
+- macOS builds are not code-signed, so OS notifications don't show on macOS (Electron 43+ requires signing; the `failed` event is handled)
+- "Launch at startup" registers the app with `--hidden`, which starts it in the tray
 - keytar is an optional dependency used only to migrate passwords saved by older versions into `safeStorage`; the app runs without it
 - CI (`.github/workflows/build.yml`) builds all platforms on tag push `v*` and creates a prerelease; Node and action versions are pinned

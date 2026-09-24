@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # npm packages: minor/patch updates grouped into one PR per week;
+  # major versions (e.g. a new Electron major) get their own PR
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      minor-and-patch:
+        update-types: [minor, patch]
+
+  # GitHub Actions used by the build workflow
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
