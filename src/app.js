@@ -1408,7 +1408,7 @@ function showAddAccountModal() {
       </div>
     </div>
     <div style="color:var(--text3);font-size:12px;margin-top:12px;margin-bottom:12px">
-      Connects to goonfleet.com — <a href="#" style="color:var(--accent);text-decoration:underline;cursor:pointer;" data-action="openExternalLink" data-args="${esc(JSON.stringify(['https://goonfleet.com/esa/']))}">Check username/password</a>
+      Connects to goonfleet.com — <a href="#" style="color:var(--accent);text-decoration:underline;cursor:pointer;" data-action="openExternalLink" data-args="${esc(JSON.stringify(['https://gice.goonfleet.com/Manage/ServicePassword']))}">Check username/password</a>
     </div>
     <div class="modal-actions">
       <button class="btn-secondary" data-action="hideModal">Cancel</button>
