@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-BeeTalk is an Electron-based XMPP chat client for Windows that supports multi-account connectivity, group chats (MUC), message history, and system tray integration. It connects to XMPP servers (primarily GSF Jabber).
+BeeTalk is an Electron-based XMPP chat client for Windows for GSF Jabber (goonfleet.com). It supports one account, group chats (MUC), direct messages with server-side history, and system tray integration.
 
 ## Development Commands
 
@@ -40,59 +40,70 @@ Place a 256×256 PNG at `assets/icon.png` and run `npm run icons` before buildin
 ### Three-Process Model
 
 1. **Main Process** (`src/main.js`)
-   - Electron app lifecycle, window creation, system tray
-   - XMPP connection pool (one per account)
+   - Electron app lifecycle, window creation (sandboxed, navigation blocked), system tray
+   - XMPP connection (`connections[accountId]._xmpp`, one account)
    - Credential storage via Electron `safeStorage` (OS-level encryption)
-   - IPC handlers that the renderer calls
+   - IPC handlers that the renderer calls; OS notifications
 
 2. **Preload Script** (`src/preload.js`)
-   - Context isolation bridge: converts IPC channels between kebab-case and camelCase
-   - Example: `ipcRenderer.send('xmpp-connect')` → `window.electronAPI.xmppConnect()`
-   - Ensures renderer cannot access Node.js APIs
+   - Context isolation bridge exposing `window.electronAPI`
+   - The renderer's `ipcRenderer` shim in `src/app.js` maps channel names to camelCase: `send('xmpp-connect')` → `electronAPI.xmppConnect()`, `on('app-focus')` → `electronAPI.onAppFocus()`
+   - **Every channel the renderer uses must be exposed here.** A missing one only logs a console warning ("IPC channel not exposed in preload")
 
 3. **Renderer Process** (`src/app.js` + `src/index.html` + `src/styles.css`)
-   - UI layout, styling, client-side routing between accounts/chats
-   - Account and chat state management
-   - XMPP event listeners and message rendering
-   - Modal dialogs (settings, emoticons, room discovery, etc.)
+   - UI, chat state, XMPP event handling, message rendering, modals
+
+### Security Rules (renderer)
+
+Chat content (messages, room subjects, nicknames, room names) is untrusted. The page's CSP is `script-src 'self'`, so inline script and inline event handlers are blocked.
+
+- **Never use inline handlers** (`onclick="..."`). For clickable elements in generated HTML use `data-action="functionName"` plus `data-args="${esc(JSON.stringify([...]))}"`. One click listener dispatches these, and only to names in the `UI_ACTIONS` allow-list at the top of `src/app.js`; add new actions there. `data-close="modal"` also closes the modal afterwards.
+- **Escape all interpolated values** with `esc()` when building HTML strings.
+- **Message HTML** goes through `sanitizeMessageHTML()`, which parses with `DOMParser` (inert) and keeps only allow-listed tags. Links (`linkifyUrls`, `escapeAndLinkify`) and emoticons (`applyEmoticons`) are built as DOM nodes; never pass message text through `innerHTML`.
+- The main process doesn't trust renderer data: `xmpp-connect` connects using the stored account with the server pinned to `goonfleet.com`, and `open-link` only opens http(s) URLs.
 
 ### State Management
 
 The renderer maintains a single `state` object in `src/app.js`:
-- `accounts[]` — array of connected XMPP accounts with credentials, presence, display name
-- `chats{}` — map of chat rooms/direct messages keyed by `accountId::jid`
+- `accounts[]` — the account (single-account mode; kept as an array), with presence and display name
+- `chats{}` — rooms and DMs keyed by `accountId::jid`. Room private messages use the full `room@conference/nick` JID
 - `activeAccountId`, `activeChatKey` — current selection in UI
-- Idle/focus state for auto-away detection
+- `appIsFocused`, idle state for auto-away
 
-Changes flow: main process → renderer via IPC events → state mutations → DOM re-renders
-
-### Multi-Account Architecture
-
-Each account has its own XMPP client (`connections[accountId]._xmpp`). Accounts are displayed as sidebar icons and can be switched. Each chat (room or direct message) is tied to an account. When an account disconnects, all its chats are marked offline.
+Changes flow: main process → renderer via IPC events → state mutations → DOM re-renders. Hot paths (messages, presence) use `scheduleLeftPanel()` / `scheduleParticipants()` to re-render at most once per animation frame.
 
 ### IPC Communication
 
-**Renderer → Main** (via `ipcRenderer.send()` or `.invoke()`):
-- `xmpp-connect`: Connect account with credentials
-- `xmpp-send-message`: Send message to room/user
-- `xmpp-disconnect`, `xmpp-send-presence`: Control connection
-- `load-accounts`, `save-accounts`: Persist account list
+**Renderer → Main**:
+- `xmpp-connect`, `xmpp-disconnect`, `xmpp-send-presence`
+- `xmpp-send-message`, `xmpp-join-room` (with optional `since` for history), `xmpp-leave-room`
+- `xmpp-add-contact`, `xmpp-remove-contact`, `xmpp-update-contact-groups`
+- `load-accounts`, `save-accounts`, `load-message-history` (MAM, DMs), `discover-rooms`, `load-emoticons`
+- `show-notification`, `open-link`, `set-launch-on-startup`, `check-update`, `get-version`, window controls
 
-**Main → Renderer** (via `event.reply()` or broadcast):
-- `xmpp-status`: Account connected/disconnected/error
-- `xmpp-message`: New message received
-- `xmpp-room-users`: Participant list for a room
-- `xmpp-room-discovery`: Available rooms from server
+**Main → Renderer**:
+- `xmpp-status` (`connecting` / `online` / `offline` / `error` / `authfail`), `xmpp-message` (with `delayed` for history), `xmpp-presence`, `xmpp-roster`, `xmpp-room-subject`
+- `app-focus`, `app-blur`, `tray-status`, `open-chat` (notification clicked), `update-available`
 
-### Message Rendering
+### Connection & Reconnect
 
-Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`) to avoid UI jank when loading large history. The room stores all messages in `state.chats[key].messages[]` but only displays the last `MAX_DISPLAYED_MESSAGES_ROOM = 500` in the DOM. This prevents memory bloat while keeping full history for search/scroll.
+- @xmpp/client reconnects by itself after every disconnect. `connectXmpp()` only tunes `xmpp.reconnect.delay` (2s, doubling to 5 min, reset when online) and reports a drop to the UI once.
+- After an authentication failure the connection is destroyed; retrying a wrong password could lock the account.
+- The password is only sent after STARTTLS succeeded (`credentials` callback + `isEncrypted()`); goonfleet.com offers only SASL PLAIN.
+
+### Messages, History & Notifications
+
+- Rooms request history on join; on rejoin `since` is set from the last known message, and replayed messages that match an existing one (`isDuplicateMessage`) are skipped.
+- DM history comes from the server archive (XEP-0313) when a DM is opened and is merged into the chat.
+- Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`); rooms show at most `MAX_DISPLAYED_MESSAGES_ROOM = 500` in the DOM.
+- The renderer decides on notifications (`notifyIfNeeded`): DMs, Directorbot and mentions of your nick; never for history, your own messages or Do Not Disturb.
 
 ### Persistence
 
-- **Accounts & Rooms**: Stored in `electron-store` (JSON file on disk), loaded on app start
-- **Passwords**: Encrypted with Electron `safeStorage` (DPAPI/Keychain/libsecret) and stored as base64 in `electron-store` under `passwords[accountId]`; never written as plaintext
-- **XMPP Server Connection**: GSF Jabber hardcoded in `src/app.js` line ~732; can be changed at startup
+- **Account**: `electron-store` (`accounts`), without password
+- **Password**: encrypted with `safeStorage` and stored as base64 in `electron-store` under `passwords[accountId]`
+- **Rooms, roster, groups, chat state, messages, settings**: renderer `localStorage` (`rooms_*`, `roster_*`, `chat_*`, `chat_messages_*`, `appSettings`). Messages are saved at most every 3 s per chat, 200 per room / 500 per DM
+- **Server**: `goonfleet.com` (`GSF_SERVER` in `src/main.js`)
 
 ### Idle Detection & Auto-Away
 
@@ -101,55 +112,32 @@ Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`) to avoid UI jank whe
 - When idle threshold is reached, presence is set to 'away'
 - When user becomes active again, presence returns to 'available'
 
-## Key Implementation Details
-
-### Account Connection Flow
-1. Renderer calls `ipcRenderer.invoke('xmpp-connect', { username, password, displayName, ... })`
-2. Main process creates XMPP client, sets up event listeners, saves account to electron-store
-3. Main broadcasts `xmpp-status` with connection state
-4. Renderer updates account status dot (green = connected, red = disconnected)
-5. Main stores password encrypted via `safeStorage`; it is never sent back to the renderer
-
-### Message Flow in Rooms
-1. User types in message input, hits Enter
-2. Renderer calls `ipcRenderer.send('xmpp-send-message', { chatKey, text })`
-3. Main finds the account's XMPP client, sends message via stanza
-4. Server sends message back to all participants via MUC
-5. Main receives message event, broadcasts `xmpp-message`
-6. Renderer updates `state.chats[chatKey].messages[]` and re-renders
-
-### Search
-Search filters both account names and chat names (rooms + contacts). The search input automatically focuses on account/room/contact matching as the user types.
-
-### Emoticon System
-Emoticon picker is a modal with search and favorites. Emoticons are simple text replacements (e.g., `:smile:` → corresponding symbol). Data structure is in renderer state; emoticon packs are in `assets/emoticons/`.
-
 ## Common Patterns
 
 ### DOM Updates
-Use `$()` shorthand to get DOM elements by ID (defined at top of `src/app.js`). Most UI updates call `render*()` functions that rebuild a section of the DOM. Example: `renderLeftPanel()` re-renders all accounts and chat list.
+Use `$()` shorthand to get DOM elements by ID (defined at top of `src/app.js`). Most UI updates call `render*()` functions that rebuild a section of the DOM, e.g. `renderLeftPanel()` rebuilds the contact and room lists.
 
 ### Error Handling
-Connection errors are shown in the connection status bar at the top of the chat area. XMPP stanza errors are logged to console. Graceful degradation: if an operation fails (e.g., room discovery), the UI shows an error message but doesn't crash.
+Connection errors are shown in the connection status bar at the top of the chat area. XMPP stanza errors are logged to console. If an operation fails (e.g., room discovery), the UI shows an error message but doesn't crash.
 
 ### Modal Dialogs
-Call `showModal(html)` to display a modal; call `hideModal()` to close. Modals include settings, emoticon picker, room discovery, add-account form.
+Call `showModal(html)` to display a modal and `hideModal()` to close it. The HTML must follow the security rules above (escaped values, `data-action` instead of inline handlers).
+
+### Emoticons
+Emoticon packs are in `assets/emoticons/` (`theme` files map image files to shortcuts). `parseEmoticons()` uses one regex over all names, longest first, and `applyEmoticons()` turns the placeholders into `<img>` nodes.
 
 ### Theming
-Light/dark theme is controlled by a CSS class on `<body>`. The theme choice is persisted in electron-store. CSS variables (e.g., `--bg-primary`) adapt colors for each theme.
+Light/dark theme is a `data-theme` attribute on `<html>`, persisted in `localStorage` (`appSettings.theme`). CSS variables adapt colors for each theme.
 
 ## Testing & Debugging
 
-- **Dev Tools**: `Ctrl+Shift+I` in dev mode (if dev tools enabled in main.js)
-- **Console**: Open DevTools or check terminal output for logs
-- **Slow XMPP?**: Add `console.log()` in main.js connection handlers to trace stanza flow
-- **IPC Debug**: Add logs in preload.js channel conversion to see what's being called
-- **State Issues**: Inspect `state` object in DevTools console directly
+- **Linux dev**: if `npm start` aborts with "The SUID sandbox helper binary was found, but is not configured correctly", run `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox` (or use `npx electron --no-sandbox .` for local testing only)
+- **Dev Tools**: `Ctrl+Shift+I`
+- **Console**: DevTools for the renderer; the terminal for main-process logs. `DEBUG=true` enables extra main-process logging
+- **State Issues**: Inspect the `state` object in the DevTools console
 
 ## Notes for Maintainers
 
 - Electron version is pinned to 41.2.0; check for security updates regularly
 - keytar is an optional dependency used only to migrate passwords saved by older versions into `safeStorage`; the app runs without it
-- Reconnection logic uses exponential backoff timers; timers are stored in `reconnectTimers` map
-- MUC (Multi-User Chat) room join flow requires sending presence after joining; this is handled in main.js
-- Message Archive Management (MAM) queries for history happen on room join; they're paginated to avoid overload
+- CI (`.github/workflows/build.yml`) builds all platforms on tag push `v*` and creates a prerelease; Node and action versions are pinned

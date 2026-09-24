@@ -171,7 +171,8 @@ const UI_ACTIONS = new Set([
   'showCreateGroupModal', 'showCreateRoomGroupModal', 'showEditAccountModal', 'submitAccountSettings',
   'submitAddAccount', 'submitCreateDMGroup', 'submitCreateGroup', 'submitCreateRoomGroup',
   'submitDeleteActiveDM', 'submitDeleteGroup', 'submitEditAccount', 'submitJoinRoom',
-  'submitRemoveContact', 'submitRenameGroup', 'switchEmoticonFolder', 'toggleFavoriteEmoticon'
+  'submitRemoveContact', 'submitRenameGroup', 'switchEmoticonFolder', 'toggleFavoriteEmoticon',
+  'showJoinRoomModal'
 ]);
 document.addEventListener('click', e => {
   const el = e.target.closest('[data-action]');
@@ -1386,12 +1387,6 @@ function sendMessage() {
 // ─────────────────────────────────────────────
 function getActiveAccount() { return state.accounts.find(a => a.id === state.activeAccountId) || null; }
 
-function switchAccount(id) {
-  state.activeAccountId = id;
-  renderAccountBar();
-  renderLeftPanel();
-}
-
 function showAddAccountModal() {
   // Single-account mode: only allow adding when no account exists yet
   if (state.accounts.length > 0) return;
@@ -1966,35 +1961,6 @@ document.addEventListener('click', (e) => {
   }
 });
 
-function addParticipantToContacts(accountId, jid, name, roomChat) {
-  const acct = state.accounts.find(a => a.id === accountId);
-  if (!acct) return;
-
-  // Add to roster (will subscribe)
-  ipcRenderer.send('xmpp-add-contact', { accountId, jid, name });
-
-  // Add to local roster
-  if (!acct.roster) acct.roster = {};
-
-  // Get participant's presence from room if available
-  let presence = 'offline';
-  if (roomChat && roomChat.participants && roomChat.participants[name]) {
-    const partData = roomChat.participants[name];
-    const presenceVal = (typeof partData === 'object') ? partData?.presence : partData;
-    presence = presenceVal !== 'offline' ? 'available' : 'offline';
-  }
-
-  acct.roster[jid] = { jid, name, presence, groups: [] };
-
-  // Save to localStorage immediately for persistence
-  saveRoster(accountId, acct.roster);
-
-  addSystemMsg(null, accountId, `📋 Subscription request sent to ${name}`);
-  hideModal();
-  renderLeftPanel();
-}
-
-window.addParticipantToContacts = addParticipantToContacts;
 
 function openDirectMessageWithParticipant(chat, nick) {
   const acct = state.accounts.find(a => a.id === chat.accountId);
@@ -2012,9 +1978,6 @@ function openDirectMessageWithParticipant(chat, nick) {
 window.openDirectMessageWithParticipant = openDirectMessageWithParticipant;
 window.showParticipantContextMenu = showParticipantContextMenu;
 
-function escapeForJavaScript(str) {
-  return str.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-}
 window.leaveRoomConfirm = (accountId, roomJid) => {
   const acct = state.accounts.find(a => a.id === accountId);
   if (acct) leaveRoom(acct, roomJid);
@@ -2385,7 +2348,8 @@ window.submitJoinRoom = () => {
     document.getElementById('modal-error').innerHTML = '<div class="strip error">Room name is required.</div>';
     return;
   }
-  const roomJid = roomName + '@conference.goonfleet.com';
+  // Accept either a room name or a full room JID
+  const roomJid = (roomName.includes('@') ? roomName : roomName + '@conference.goonfleet.com').toLowerCase();
   const acct = getActiveAccount();
   hideModal();
   sendJoinRoom(acct, roomJid);
@@ -2636,12 +2600,6 @@ window.checkForUpdate = async () => {
     message.style.color = '#F44336';
   } finally {
     btn.disabled = false;
-  }
-};
-
-window.installUpdate = async (releaseUrl) => {
-  if (typeof releaseUrl === 'string' && /^https?:\/\//.test(releaseUrl)) {
-    openExternalLink(releaseUrl);
   }
 };
 
@@ -3104,18 +3062,6 @@ function addRecentEmoticon(name) {
   saveAppSettings({ recentEmoticons: newRecent });
 }
 
-function togglePinnedChat(chatKey) {
-  const settings = getAppSettings();
-  let pinnedChats = settings.pinnedChats || [];
-  if (pinnedChats.includes(chatKey)) {
-    pinnedChats = pinnedChats.filter(k => k !== chatKey);
-  } else {
-    pinnedChats = [chatKey, ...pinnedChats];
-  }
-  saveAppSettings({ pinnedChats });
-  renderLeftPanel();
-}
-
 function getBadgeStyle(chat) {
   // Return different badge styles based on chat type and content
   if (chat.type === 'dm') {
@@ -3237,6 +3183,7 @@ function showBrowseRoomsModal() {
     <div id="rooms-list" style="display: none;"></div>
     <div class="modal-actions">
       <button class="btn-secondary" data-action="hideModal">Close</button>
+      <button class="btn-secondary" data-action="showJoinRoomModal">Join by name…</button>
       <button class="btn-primary" id="btn-join-selected" data-action="joinMultipleRooms" style="display: none;">Join Selected</button>
     </div>
   `);
@@ -3271,7 +3218,7 @@ async function discoverRooms(accountId) {
       document.getElementById('modal-error').innerHTML = `
         <div class="strip error">
           <div style="font-weight: 500; margin-bottom: 6px;">Room discovery unavailable</div>
-          <div style="font-size: 12px;">The server isn't responding to room discovery requests. You can still join rooms manually by using the "Join a room" option and entering the room name.</div>
+          <div style="font-size: 12px;">The server isn't responding to room discovery requests. You can still join a room with "Join by name…" below.</div>
         </div>
       `;
       return;
@@ -3512,13 +3459,6 @@ if (newContactInput) {
   });
 }
 
-// Close context menu when clicking elsewhere
-document.addEventListener('click', (e) => {
-  const contextMenu = document.getElementById('context-menu');
-  if (contextMenu && !contextMenu.classList.contains('hidden') && !contextMenu.contains(e.target)) {
-    hideContextMenu();
-  }
-});
 
 // ─────────────────────────────────────────────
 //  Participants panel injection

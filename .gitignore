@@ -1,2 +1,7 @@
 node_modules
 dist/
+
+# Local editor / tool state
+.vs/
+.claude/settings.local.json
+ruvector.db

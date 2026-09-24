@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- Fixed script injection from chat content: messages containing HTML (for example `<img onerror>`), links in messages and room subjects, and nicknames or room names shown in menus could run code in BeeTalk. That code could have sent the stored password to another server
+- The password is only sent over an encrypted (STARTTLS) connection
+- Passwords are stored with Electron `safeStorage` instead of keytar (existing passwords are migrated)
+
+### Fixed
+- Adding an account on first start (the add buttons were hidden)
+- Adding, removing and regrouping contacts, the tray status menu and unread badges while the window is unfocused did nothing
+- Adding a contact by username used `@goonfleet` instead of `@goonfleet.com`
+- Room messages were duplicated after every reconnect, and saved room history could be overwritten
+- A wrong password is no longer retried endlessly; reconnects back off up to 5 minutes
+- DM history loaded the oldest messages and showed your own archived messages as the other person's
+- DMs to room participants went to an invalid address; they are now sent as room private messages
+- Emoticons such as `>:-(` or `:dadjoke:` were split into other emoticons
+- "Join by name…" in Browse Rooms, for when room discovery fails
+
+### Changed
+- Notifications only for DMs, Directorbot and mentions of your nick; not for history, your own messages or Do Not Disturb. Clicking a notification opens the chat
+- Busy rooms render much faster; chat history is saved less often (200 messages per room, 500 per DM)
+- Removed the unused EVE Online features and data (~9.5 MB smaller installer)
+
 ## [1.0.6] - 2026-04-20
 
 ### Added
