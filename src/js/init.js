@@ -65,6 +65,10 @@ document.addEventListener('keydown', e => {
   resetIdleTimer();
 });
 
+// Let the main process react to the network going away/coming back right away
+window.addEventListener('offline', () => ipcRenderer.send('network-status', { online: false }));
+window.addEventListener('online', () => ipcRenderer.send('network-status', { online: true }));
+
 // Track user activity for idle detection
 document.addEventListener('mousemove', resetIdleTimer, true);
 document.addEventListener('mousedown', resetIdleTimer, true);

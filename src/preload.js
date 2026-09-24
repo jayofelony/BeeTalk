@@ -40,6 +40,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openLink: (url) => ipcRenderer.send('open-link', url),
   setLaunchOnStartup: (data) => ipcRenderer.send('set-launch-on-startup', data),
   showNotification: (data) => ipcRenderer.send('show-notification', data),
+  networkStatus: (data) => ipcRenderer.send('network-status', data),
 
   // IPC invokes (can return data)
   loadAccounts: () => ipcRenderer.invoke('load-accounts'),

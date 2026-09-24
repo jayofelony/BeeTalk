@@ -75,6 +75,10 @@ module.exports = async t => {
   t.fake.sent.length = 0;
   await type('typing to erin');
   t.equal(t.sent('xmpp-send-chat-state'), [], 'no chat states to peers that never sent any');
+  // Network changes from the OS are passed to the main process right away
+  t.fake.sent.length = 0;
+  await page.js("window.dispatchEvent(new Event('offline')); window.dispatchEvent(new Event('online')); 0");
+  t.equal(t.sent('network-status'), [{ online: false }, { online: true }], 'offline/online events are reported to the main process');
   t.equal(page.consoleErrors, [], 'no errors in the page console');
   page.close();
 };

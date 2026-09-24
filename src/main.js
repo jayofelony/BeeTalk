@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, safeStorage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, safeStorage, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 // electron-store 9+ is an ES module; require() returns its namespace
@@ -256,6 +256,7 @@ async function connectXmpp(account) {
   const watcher = watchConnection(xmpp, {
     isCurrent,
     onOnline: ({ resumed }) => {
+      console.log(`[conn] online${resumed ? ' (session resumed)' : ''}`);
       send('xmpp-status', { id, status: 'online', jid: xmpp.jid.toString(), resumed });
       // A resumed session (XEP-0198) keeps presence, roster, rooms and carbons on the server
       if (resumed) return;
@@ -265,14 +266,17 @@ async function connectXmpp(account) {
       // Message carbons (XEP-0280): also receive DMs sent/received by our other devices
       xmpp.iqCaller.request(xml('iq', { type: 'set' }, xml('enable', { xmlns: CARBONS })), 10000).catch(() => {});
     },
-    onOffline: () => send('xmpp-status', { id, status: 'offline' }),
-    onError: error => send('xmpp-status', { id, status: 'error', error }),
+    onOffline: () => { console.log('[conn] connection lost, reconnecting'); send('xmpp-status', { id, status: 'offline' }); },
+    onError: error => { console.log(`[conn] error: ${error}`); send('xmpp-status', { id, status: 'error', error }); },
+    onKeepaliveFailed: () => console.log('[conn] keepalive ping unanswered, dropping the dead connection'),
     onAuthFail: error => {
+      console.log(`[conn] authentication failed: ${error}`);
       send('xmpp-status', { id, status: 'authfail', error });
       destroyConnection(id);
     }
   });
   connections[id].watcher = watcher;
+  xmpp.reconnect.on('reconnecting', () => console.log(`[conn] reconnect attempt (next retry in ${Math.round(xmpp.reconnect.delay / 1000)} s if it fails)`));
 
   xmpp.on('stanza', stanza => handleStanza(id, stanza));
   xmpp.start().catch(watcher.handleError);
@@ -386,6 +390,16 @@ ipcMain.on('window-close',    () => mainWindow.hide());
 ipcMain.on('window-focus',    () => {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
+});
+
+// Network changes reported by the OS (via the renderer's online/offline events) and
+// waking from sleep: react right away instead of waiting for the keepalive/backoff
+function forEachWatcher(fn) {
+  Object.values(connections).forEach(c => c.watcher && fn(c.watcher));
+}
+ipcMain.on('network-status', (e, { online }) => {
+  console.log(`[conn] network ${online ? 'available' : 'lost'}`);
+  forEachWatcher(w => (online ? w.networkBack() : w.networkLost()));
 });
 
 ipcMain.on('xmpp-connect', (e, account) => {
@@ -1086,6 +1100,10 @@ if (!gotTheLock) {
 
 app.whenReady().then(async () => {
   cleanupLegacyElectronShortcut();
+  powerMonitor.on('resume', () => {
+    console.log('[conn] woke from sleep');
+    forEachWatcher(w => w.networkBack());
+  });
   createWindow();
   createTray();
 

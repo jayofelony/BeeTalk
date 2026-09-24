@@ -118,3 +118,46 @@ test('a wrong password is reported as authfail, once', { timeout: 10000 }, async
   assert.deepStrictEqual(events.filter(e => e === 'authfail'), ['authfail']);
   assert.strictEqual(state.logins, 0);
 });
+
+test('a keepalive ping that never finishes sending still counts as dead', { timeout: 10000 }, async (t) => {
+  const srv = await fakeServer(); const { port } = srv;
+  const { xmpp, events, watcher } = connect(port, { pingInterval: 200, pingTimeout: 300, onKeepaliveFailed: () => events.push('keepalive failed') });
+  t.after(() => shutdown(xmpp, watcher, srv));
+  assert.ok(await waitFor(() => events.includes('online')));
+  // Like a dead connection where the socket write never completes (the library's own
+  // iq timeout only starts after the write)
+  const write = xmpp.write.bind(xmpp);
+  xmpp.write = str => (str.includes('urn:xmpp:ping') ? new Promise(() => {}) : write(str));
+  assert.ok(await waitFor(() => events.includes('online(resumed)'), 3000), `detected and resumed: ${events}`);
+  assert.deepStrictEqual(events.slice(0, 4), ['online', 'keepalive failed', 'offline', 'online(resumed)']);
+});
+
+test('network lost: dropped at once; network back: reconnects at once, not after the backoff', { timeout: 10000 }, async (t) => {
+  const srv = await fakeServer(); const { state, port } = srv;
+  // A long backoff, so only networkBack() can explain a quick reconnect
+  const { xmpp, events, watcher } = connect(port, { minDelay: 20000 });
+  t.after(() => shutdown(xmpp, watcher, srv));
+  assert.ok(await waitFor(() => events.includes('online')));
+
+  const lostAt = Date.now();
+  watcher.networkLost();
+  assert.ok(await waitFor(() => events.includes('offline'), 1000), 'offline right away');
+  assert.ok(Date.now() - lostAt < 1000);
+
+  await new Promise(r => setTimeout(r, 300));
+  assert.ok(!events.includes('online(resumed)'), 'not reconnected by itself yet (backoff is 20 s)');
+  watcher.networkBack();
+  assert.ok(await waitFor(() => events.includes('online(resumed)'), 3000), `reconnected right away: ${events}`);
+  assert.strictEqual(state.resumes, 1);
+});
+
+test('network back while still online: the connection is checked with a ping, not dropped', { timeout: 10000 }, async (t) => {
+  const srv = await fakeServer({ answerPings: true }); const { state, port } = srv;
+  const { xmpp, events, watcher } = connect(port);
+  t.after(() => shutdown(xmpp, watcher, srv));
+  assert.ok(await waitFor(() => events.includes('online')));
+  watcher.networkBack();
+  await new Promise(r => setTimeout(r, 500));
+  assert.deepStrictEqual(events, ['online']);
+  assert.strictEqual(state.sockets.length, 1);
+});

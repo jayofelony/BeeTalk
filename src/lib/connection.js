@@ -32,15 +32,41 @@ function watchConnection(xmpp, {
   onOffline,           // () => void, once per outage
   onError,             // (message) => void, once per outage
   onAuthFail,          // (message) => void
+  onKeepaliveFailed = () => {},  // () => void, before a dead connection is dropped
   isCurrent = () => true,
   minDelay = 2000,
   maxDelay = 5 * 60 * 1000,
-  pingInterval = 60 * 1000,
-  pingTimeout = 15 * 1000
+  pingInterval = 30 * 1000,
+  pingTimeout = 10 * 1000
 }) {
   let down = false;
+  let stopped = false;   // after an authentication failure or stop()
   let pingTimer = null;
   xmpp.reconnect.delay = minDelay;
+
+  // Ping the server; resolves true if it answered (an error reply counts), false if
+  // nothing came back in time. The timeout covers sending too: on a dead connection
+  // the write itself may never complete, and the library only starts its own
+  // timeout after the write.
+  async function isAlive(timeout) {
+    let timer;
+    const expired = new Promise(resolve => { timer = setTimeout(() => resolve('timeout'), timeout); });
+    const ping = xmpp.iqCaller.request(
+      xml('iq', { type: 'get', to: xmpp.options?.domain }, xml('ping', { xmlns: 'urn:xmpp:ping' })),
+      timeout
+    ).then(() => 'ok', err => (err.name === 'TimeoutError' ? 'timeout' : 'ok'));
+    const result = await Promise.race([ping, expired]);
+    clearTimeout(timer);
+    return result === 'ok';
+  }
+
+  async function keepalive(timeout = pingTimeout) {
+    if (xmpp.status !== 'online' || stopped) return;
+    if (!(await isAlive(timeout)) && isCurrent() && xmpp.status === 'online') {
+      onKeepaliveFailed();
+      dropSocket(xmpp);
+    }
+  }
 
   function stopPing() {
     clearInterval(pingTimer);
@@ -48,22 +74,11 @@ function watchConnection(xmpp, {
   }
   function startPing() {
     stopPing();
-    pingTimer = setInterval(async () => {
-      if (xmpp.status !== 'online') return;
-      try {
-        await xmpp.iqCaller.request(
-          xml('iq', { type: 'get', to: xmpp.options?.domain }, xml('ping', { xmlns: 'urn:xmpp:ping' })),
-          pingTimeout
-        );
-      } catch (err) {
-        // An error reply still proves the connection is alive; only silence means it's dead
-        if (err.name === 'TimeoutError' && isCurrent()) dropSocket(xmpp);
-      }
-    }, pingInterval);
+    pingTimer = setInterval(() => keepalive(), pingInterval);
   }
 
   function online(resumed) {
-    if (!isCurrent()) return;
+    if (!isCurrent() || stopped) return;
     down = false;
     xmpp.reconnect.delay = minDelay;
     startPing();
@@ -92,6 +107,7 @@ function watchConnection(xmpp, {
     const isAuth = err.name === 'SASLError' || /not-authorized|credentials/i.test(message);
     if (isAuth) {
       down = true;
+      stopped = true;
       stopPing();
       onAuthFail(message);
       return;
@@ -102,7 +118,27 @@ function watchConnection(xmpp, {
   }
   xmpp.on('error', handleError);
 
-  return { handleError, stop: stopPing };
+  return {
+    handleError,
+    stop() { stopped = true; stopPing(); },
+    // The OS reports no network: the connection can't work, drop it now instead of
+    // waiting for the keepalive (the server keeps the session for a quick resume)
+    networkLost() {
+      if (stopped || !isCurrent()) return;
+      if (['online', 'connecting', 'connect', 'opening', 'open'].includes(xmpp.status)) dropSocket(xmpp);
+    },
+    // Network is back or the computer woke up: reconnect now instead of waiting for
+    // the backoff timer, or check that a connection that looks online still works
+    networkBack() {
+      if (stopped || !isCurrent()) return;
+      if (xmpp.status === 'disconnect') {
+        xmpp.reconnect.delay = 500;
+        xmpp.reconnect.scheduleReconnect();
+      } else if (xmpp.status === 'online') {
+        keepalive(5000);
+      }
+    }
+  };
 }
 
 module.exports = { watchConnection, dropSocket };
