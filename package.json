@@ -94,7 +94,7 @@
   },
   "dependencies": {
     "@xmpp/client": "^0.13.0",
-    "electron-store": "^8.1.0"
+    "electron-store": "^11.0.2"
   },
   "overrides": {
     "file-type": "^22.0.0"
