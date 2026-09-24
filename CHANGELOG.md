@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.0.12] - 2026-09-24
 
 ### Security
 - Fixed script injection from chat content: messages containing HTML (for example `<img onerror>`), links in messages and room subjects, and nicknames or room names shown in menus could run code in BeeTalk. That code could have sent the stored password to another server
