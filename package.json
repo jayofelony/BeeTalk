@@ -10,6 +10,7 @@
     "icons": "node scripts/create-icons.js",
     "build": "npm run icons && electron-builder -mwl",
     "build:win": "npm run icons && electron-builder --win --publish never",
+    "build:win:docker": "bash scripts/build-win-docker.sh",
     "build:mac": "npm run icons && electron-builder --mac --publish never",
     "build:linux": "electron-builder --linux --publish never",
     "pack": "electron-builder --dir"

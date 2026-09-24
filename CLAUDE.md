@@ -22,6 +22,7 @@ npm run pack      # Create portable directory (no installer)
 ### Building Installers
 ```bash
 npm run build:win     # Windows NSIS installer (x64) → dist/
+npm run build:win:docker  # Windows installer built on Linux via Docker (electronuserland/builder:wine)
 npm run build:mac     # macOS DMG + zip → dist/
 npm run build:linux   # Linux AppImage + deb → dist/
 npm run build         # All platforms (runs build:win, build:mac, build:linux, build:linux)
