@@ -9,7 +9,7 @@ const ipcRenderer = {
       i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word.charAt(0).toUpperCase() + word.slice(1)
     ).join('');
     const fn = window.electronAPI[camelCase];
-    if (fn) fn(callback);
+    if (fn) fn(callback); else console.warn(`IPC channel not exposed in preload: ${channel}`);
   },
   send: (channel, data) => {
     // Convert channel name to camelCase function name
@@ -18,7 +18,7 @@ const ipcRenderer = {
       i === 0 ? word : word.charAt(0).toUpperCase() + word.slice(1)
     ).join('');
     const fn = window.electronAPI[camelCase];
-    if (fn) fn(data);
+    if (fn) fn(data); else console.warn(`IPC channel not exposed in preload: ${channel}`);
   },
   invoke: (channel, data) => {
     // e.g., 'load-accounts' -> 'loadAccounts'
@@ -27,6 +27,7 @@ const ipcRenderer = {
     ).join('');
     const fn = window.electronAPI[camelCase];
     if (fn) return fn(data);
+    console.warn(`IPC channel not exposed in preload: ${channel}`);
     return Promise.resolve(null);
   }
 };
@@ -269,9 +270,9 @@ ipcRenderer.on('xmpp-status', (e, { id, status, jid, error }) => {
       if (state.chats[key]) {
         state.chats[key].groups = roomAssignments[r.jid] || [];
       }
-      // Send join request
+      // Send join request, asking only for history we missed
       state.chats[key].myNick = acct.displayName;
-      ipcRenderer.send('xmpp-join-room', { accountId: id, roomJid: r.jid, nick: acct.displayName });
+      ipcRenderer.send('xmpp-join-room', { accountId: id, roomJid: r.jid, nick: acct.displayName, since: historySince(state.chats[key]) });
     });
 
     saveRooms(id);
@@ -381,7 +382,7 @@ ipcRenderer.on('app-blur', () => {
   state.appIsFocused = false;
 });
 
-ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
+ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed }) => {
   const senderBareJid = bareJid(from);
   const senderName = senderBareJid.split('@')[0];
 
@@ -393,6 +394,7 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
 
     // Auto-open Directorbot chat
     openChat(key);
+    notifyIfNeeded(key, 'Directorbot', body);
 
     // Play alarm if enabled and not in Do Not Disturb mode
     const settings = getAppSettings();
@@ -408,15 +410,25 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts }) => {
     const roomJid = senderBareJid;
     const nick    = from.split('/')[1] || '?';
     const key     = chatKey(accountId, roomJid);
-    if (!state.chats[key]) return;
-    const isMe = nick === (state.chats[key].myNick || '');
-    pushMessage(key, { from: nick, text: body, ts, me: isMe });
+    const chat    = state.chats[key];
+    if (!chat) return;
+    const myNick = chat.myNick || '';
+    const msg = { from: nick, text: body, ts, me: nick === myNick };
+    if (delayed && isDuplicateMessage(chat, msg)) return;
+    pushMessage(key, msg);
+    // Rooms are busy: only notify when someone mentions our nick
+    if (!delayed && !msg.me && myNick.length >= 3 && body.toLowerCase().includes(myNick.toLowerCase())) {
+      notifyIfNeeded(key, `${chat.name} / ${nick}`, body);
+    }
   } else {
     const key = chatKey(accountId, senderBareJid);
     const acct = state.accounts.find(a => a.id === accountId);
     const displayName = acct?.roster?.[senderBareJid]?.name || senderName;
     ensureChat(key, { type: 'dm', name: displayName, jid: senderBareJid, accountId });
-    pushMessage(key, { from: displayName, text: body, ts, me: false });
+    const msg = { from: displayName, text: body, ts, me: false };
+    if (delayed && isDuplicateMessage(state.chats[key], msg)) return;
+    pushMessage(key, msg);
+    if (!delayed) notifyIfNeeded(key, displayName, body);
 
     // Play sound for DM notifications if enabled and not in Do Not Disturb mode
     const settings = getAppSettings();
@@ -459,7 +471,13 @@ ipcRenderer.on('tray-status', (e, show) => {
   const acct = getActiveAccount();
   if (acct && acct.status === 'online') {
     ipcRenderer.send('xmpp-send-presence', { accountId: acct.id, show });
+    acct.presence = show;
+    renderLeftPanel();
   }
+});
+
+ipcRenderer.on('open-chat', (e, key) => {
+  if (state.chats[key]) openChat(key);
 });
 
 ipcRenderer.on('update-available', (e, result) => {
@@ -475,8 +493,30 @@ ipcRenderer.on('update-available', (e, result) => {
 function ensureChat(key, defaults) {
   if (!state.chats[key]) {
     const savedState = loadChatState(key);
-    state.chats[key] = { messages: [], unread: 0, newMessagesWhileUnfocused: 0, participants: {}, motd: '', ...defaults, ...savedState };
+    // Load persisted messages now (not lazily on open): incoming history is
+    // de-duplicated against them and saveChatMessages() must not overwrite them.
+    state.chats[key] = { unread: 0, newMessagesWhileUnfocused: 0, participants: {}, motd: '', ...defaults, ...savedState, messages: loadChatMessages(key) };
   }
+}
+
+// History replays (room rejoin, offline delivery) can repeat messages we already have.
+// The live copy was stamped with our clock and the replay with the server's, so allow some skew.
+function isDuplicateMessage(chat, msg) {
+  const recent = chat.messages.slice(-300);
+  return recent.some(m => !m.system && m.from === msg.from && m.text === msg.text && Math.abs(m.ts - msg.ts) < 2 * 60 * 1000);
+}
+
+// ISO timestamp for the MUC `since` history parameter: slightly before our last message,
+// duplicates are filtered by isDuplicateMessage().
+function historySince(chat) {
+  const last = [...(chat?.messages || [])].reverse().find(m => !m.system && m.ts);
+  return last ? new Date(last.ts - 60 * 1000).toISOString() : undefined;
+}
+
+function notifyIfNeeded(key, title, body) {
+  const acct = state.accounts.find(a => a.id === state.chats[key]?.accountId);
+  if (state.appIsFocused || acct?.presence === 'dnd') return;
+  ipcRenderer.send('show-notification', { title, body: String(body).slice(0, 120), chatKey: key });
 }
 
 function pushMessage(key, msg) {
@@ -549,7 +589,7 @@ function sendJoinRoom(acct, roomJid, nick) {
   const key = chatKey(acct.id, roomJid);
   ensureChat(key, { type: 'room', name: roomJid.split('@')[0], jid: roomJid, accountId: acct.id, myNick: nick });
   state.chats[key].myNick = nick;
-  ipcRenderer.send('xmpp-join-room', { accountId: acct.id, roomJid, nick });
+  ipcRenderer.send('xmpp-join-room', { accountId: acct.id, roomJid, nick, since: historySince(state.chats[key]) });
   saveRooms(acct.id);
   renderLeftPanel();
 }

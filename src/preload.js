@@ -19,6 +19,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onXmppParticipants: (callback) => ipcRenderer.on('xmpp-participants', callback),
   onXmppRoomSubject: (callback) => ipcRenderer.on('xmpp-room-subject', callback),
   onUpdateAvailable: (callback) => ipcRenderer.on('update-available', callback),
+  onOpenChat: (callback) => ipcRenderer.on('open-chat', callback),
+  onAppFocus: (callback) => ipcRenderer.on('app-focus', callback),
+  onAppBlur: (callback) => ipcRenderer.on('app-blur', callback),
+  onTrayStatus: (callback) => ipcRenderer.on('tray-status', callback),
 
   // IPC senders
   xmppConnect: (account) => ipcRenderer.send('xmpp-connect', account),
@@ -27,9 +31,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   xmppSendPresence: (data) => ipcRenderer.send('xmpp-send-presence', data),
   xmppJoinRoom: (data) => ipcRenderer.send('xmpp-join-room', data),
   xmppLeaveRoom: (data) => ipcRenderer.send('xmpp-leave-room', data),
+  xmppAddContact: (data) => ipcRenderer.send('xmpp-add-contact', data),
+  xmppRemoveContact: (data) => ipcRenderer.send('xmpp-remove-contact', data),
+  xmppUpdateContactGroups: (data) => ipcRenderer.send('xmpp-update-contact-groups', data),
   saveAccounts: (accounts) => ipcRenderer.send('save-accounts', accounts),
   openLink: (url) => ipcRenderer.send('open-link', url),
   setLaunchOnStartup: (data) => ipcRenderer.send('set-launch-on-startup', data),
+  showNotification: (data) => ipcRenderer.send('show-notification', data),
 
   // IPC invokes (can return data)
   loadAccounts: () => ipcRenderer.invoke('load-accounts'),

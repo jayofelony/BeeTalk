@@ -1,5 +1,6 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, safeStorage } = require('electron');
 const path = require('path');
+const tls = require('tls');
 const fs = require('fs');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
@@ -19,7 +20,10 @@ let tray;
 let unreadCount = 0;
 
 const connections    = {};  // accountId -> { _xmpp, account }
-const reconnectTimers = {}; // accountId -> timer handle
+
+// @xmpp/client reconnects by itself after each disconnect; we only tune its delay
+const RECONNECT_MIN_MS = 2000;
+const RECONNECT_MAX_MS = 5 * 60 * 1000;
 
 // Ensure OS-level app identity uses BeeTalk instead of the Electron default name.
 app.setName('BeeTalk');
@@ -205,15 +209,17 @@ function isStreamError(err) {
 
 // Cleanly destroy an existing connection without triggering reconnect
 async function destroyConnection(id) {
-  if (reconnectTimers[id]) {
-    clearTimeout(reconnectTimers[id]);
-    delete reconnectTimers[id];
-  }
   if (!connections[id]) return;
   const old = connections[id]._xmpp;
-  delete connections[id]; // delete BEFORE stop so the 'offline' handler ignores this teardown
+  delete connections[id];
+  try { old.reconnect.stop(); } catch {}
   try { old.removeAllListeners(); } catch {}
   try { await old.stop(); } catch {}
+}
+
+function isEncrypted(xmpp) {
+  const s = xmpp.socket;
+  return s instanceof tls.TLSSocket || s?.socket instanceof tls.TLSSocket;
 }
 
 // @xmpp/client instances CANNOT be reused after stop(). Always create fresh.
@@ -256,15 +262,36 @@ async function connectXmpp(account) {
   const xmpp = client({
     service: `xmpp://${server}:${port || 5222}`,
     domain:  server,
-    username,
-    password,
-    tls: { rejectUnauthorized: true }
+    // Called right before SASL: refuse to send the password unless STARTTLS succeeded,
+    // so a network attacker stripping the STARTTLS offer can't read it.
+    credentials: async (authenticate) => {
+      if (!isEncrypted(xmpp)) {
+        send('xmpp-status', { id, status: 'error', error: 'Server connection is not encrypted; refusing to send password.' });
+        destroyConnection(id);
+        throw new Error('TLS required');
+      }
+      return authenticate({ username, password });
+    }
   });
 
   connections[id] = { _xmpp: xmpp, account };
+  xmpp.reconnect.delay = RECONNECT_MIN_MS;
   send('xmpp-status', { id, status: 'connecting' });
 
+  // Report a lost connection once, not on every failed retry
+  let downReported = false;
+
+  xmpp.on('disconnect', () => {
+    if (connections[id]?._xmpp !== xmpp) return;
+    if (!downReported) send('xmpp-status', { id, status: 'offline' });
+    downReported = true;
+    // Back off for the next attempt; the library has already scheduled this one
+    xmpp.reconnect.delay = Math.min(xmpp.reconnect.delay * 2, RECONNECT_MAX_MS);
+  });
+
   xmpp.on('online', (address) => {
+    downReported = false;
+    xmpp.reconnect.delay = RECONNECT_MIN_MS;
     send('xmpp-status', { id, status: 'online', jid: address.toString() });
     xmpp.send(xml('presence')).catch(() => {});
     xmpp.send(
@@ -276,28 +303,18 @@ async function connectXmpp(account) {
 
   xmpp.on('stanza', stanza => handleStanza(id, stanza));
 
-  xmpp.on('error', err => {
-    if (isStreamError(err)) return; // suppress teardown noise
+  const onError = err => {
+    if (isStreamError(err) || connections[id]?._xmpp !== xmpp) return;
     const msg = err.message || String(err);
-    const isAuth = /not-authorized|SASL|credentials/i.test(msg);
+    const isAuth = err.name === 'SASLError' || /not-authorized|credentials/i.test(msg);
+    if (!isAuth && downReported) return;  // still retrying; already reported
+    downReported = true;
     send('xmpp-status', { id, status: isAuth ? 'authfail' : 'error', error: msg });
-  });
-
-  xmpp.on('offline', () => {
-    // Guard: only react if this xmpp instance is still the active one
-    if (!connections[id] || connections[id]._xmpp !== xmpp) return;
-    send('xmpp-status', { id, status: 'offline' });
-    reconnectTimers[id] = setTimeout(async () => {
-      delete reconnectTimers[id];
-      if (connections[id]) await connectXmpp(connections[id].account);
-    }, 5000);
-  });
-
-  xmpp.start().catch(err => {
-    if (isStreamError(err)) return;
-    const msg = err.message || String(err);
-    send('xmpp-status', { id, status: 'error', error: msg });
-  });
+    // Retrying a wrong password would only risk locking the account
+    if (isAuth) destroyConnection(id);
+  };
+  xmpp.on('error', onError);
+  xmpp.start().catch(onError);
 }
 
 function handleStanza(accountId, stanza) {
@@ -336,23 +353,21 @@ function handleStanza(accountId, stanza) {
     // Skip messages without body (unless they're room subjects, which we handled above)
     if (!body) return;
 
-    // Get timestamp from delay element if present (for archived messages), otherwise use now
+    // Get timestamp from delay element if present (history / offline messages), otherwise use now
     let ts = Date.now();
     const delayEl = stanza.getChild('delay', 'urn:xmpp:delay');
+    const delayed = !!(delayEl && delayEl.attrs.stamp);
     // For directorbot, don't include timestamps
     if (senderName === 'directorbot') {
       ts = 0;
-    } else if (delayEl && delayEl.attrs.stamp) {
+    } else if (delayed) {
       ts = new Date(delayEl.attrs.stamp).getTime();
     }
 
-    send('xmpp-message', { accountId, from, body, type, ts });
+    send('xmpp-message', { accountId, from, body, type, ts, delayed });
 
-    if (!mainWindow.isFocused()) {
-      const label = type === 'groupchat'
-        ? from.split('@')[0] + ' / ' + (from.split('/')[1] || '')
-        : from.split('@')[0];
-      new Notification({ title: label, body: body.slice(0, 120) }).show();
+    // Notifications are decided by the renderer (it knows DND, settings and the user's nick)
+    if (!delayed && !mainWindow.isFocused()) {
       unreadCount++;
       tray && tray.setToolTip(`BeeTalk (${unreadCount} unread)`);
     }
@@ -504,7 +519,7 @@ ipcMain.on('xmpp-remove-contact', (e, { accountId, jid }) => {
 });
 
 
-ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick }) => {
+ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick, since }) => {
   const c = connections[accountId];
   if (!c) return;
 
@@ -518,11 +533,16 @@ ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick }) => {
     return;
   }
 
-  // Join with history request (last 50 messages, max 1 hour old, max 100KB)
+  // Join with history request: only what we missed if we know our last message
+  // (`since`), otherwise the last hour. Max 50 messages / 100KB either way.
+  const history = typeof since === 'string' && !isNaN(Date.parse(since))
+    ? { maxstanzas: '50', maxchars: '102400', since }
+    : { maxstanzas: '50', maxchars: '102400', seconds: '3600' };
   c._xmpp.send(
     xml('presence', { to: `${roomJid}/${nick}` },
-      xml('x', { xmlns: 'http://jabber.org/protocol/muc' }),
-      xml('history', { maxstanzas: '50', seconds: '3600', maxchars: '102400' })
+      xml('x', { xmlns: 'http://jabber.org/protocol/muc' },
+        xml('history', history)
+      )
     )
   ).catch(() => {});
 });
@@ -542,6 +562,21 @@ ipcMain.on('xmpp-leave-room', (e, { accountId, roomJid, nick }) => {
   }
 
   c._xmpp.send(xml('presence', { to: `${roomJid}/${nick}`, type: 'unavailable' })).catch(() => {});
+});
+
+// Keep references so click handlers survive garbage collection until the notification closes
+const activeNotifications = new Set();
+ipcMain.on('show-notification', (e, { title, body, chatKey }) => {
+  if (typeof title !== 'string' || typeof body !== 'string' || mainWindow.isFocused()) return;
+  const n = new Notification({ title: title.slice(0, 100), body: body.slice(0, 120) });
+  activeNotifications.add(n);
+  n.on('click', () => {
+    mainWindow.show();
+    mainWindow.focus();
+    if (typeof chatKey === 'string') send('open-chat', chatKey);
+  });
+  n.on('close', () => activeNotifications.delete(n));
+  n.show();
 });
 
 ipcMain.on('save-accounts', (e, accounts) => {
