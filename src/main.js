@@ -1,7 +1,8 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, Notification, shell, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const Store = require('electron-store');
+// electron-store 9+ is an ES module; require() returns its namespace
+const { default: Store } = require('electron-store');
 const { client, xml } = require('@xmpp/client');
 const { isValidJid, isValidMessageType, checkMamSupport, tlsOnlyCredentials, compareVersions } = require('./lib/xmpp-helpers');
 const { watchConnection } = require('./lib/connection');

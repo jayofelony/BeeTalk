@@ -27,3 +27,7 @@ jobs:
       # Renderer tests run the real UI in hidden Electron windows; they need a display
       - name: Renderer tests
         run: xvfb-run -a npm run test:electron
+
+      # Starts the real main process; catches e.g. dependency upgrades that break startup
+      - name: App boots
+        run: xvfb-run -a npm run test:main

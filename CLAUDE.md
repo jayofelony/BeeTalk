@@ -153,12 +153,15 @@ npm test                          # everything (~15 s)
 npm run test:node                 # main-process unit tests (node --test)
 npm run test:electron             # renderer tests in hidden Electron windows
 npm run test:electron -- history  # one suite
+npm run test:main                 # starts the real app (main.js) and checks it boots
 ```
 
 - **Main-process tests** (`test/node/`): helpers in `src/lib/xmpp-helpers.js` (JID validation, version comparison, archive check) and TLS enforcement against fake XMPP servers on localhost (needs `openssl`). Keep main-process logic that can be tested without Electron in `src/lib/`.
 - **Renderer tests** (`test/electron/*.test.js`): `run.js` loads the real `index.html`/`src/js/*.js`/`preload.js` with the main process replaced by fakes (`t.fake`: accounts, emoticons, rooms, history; every `ipcRenderer.send` is recorded in `t.fake.sent`). Each suite gets fresh in-memory storage. Suites drive the app through the same IPC events the main process sends (`page.send('xmpp-message', ...)`). The boot sequence sets `document.body.dataset.ready` when done.
 - Suites cover: security (script injection, CSP, inert sanitizing), accounts, rooms, messaging/notifications, history, emoticons.
 - Hidden windows pause `requestAnimationFrame`, so tests shouldn't depend on more than a few batches of `openChat` rendering.
+- **Boot smoke test** (`test/electron/main-smoke.js`): the renderer suites fake the main process, so this is what catches a broken `main.js`, e.g. a dependency upgrade that changes how a module loads (electron-store 9+ is ESM: `require('electron-store').default`).
+- **Dependabot**: `@xmpp/*` is 0.x, where minor releases can break the API; it gets separate PRs. 0.14 changes the connection API (login, status, resumption) and needs porting before it can be merged.
 - CI runs the tests on every push to `main` and on pull requests (`.github/workflows/test.yml`); release builds only start if they pass.
 
 - **Linux dev**: if `npm start` aborts with "The SUID sandbox helper binary was found, but is not configured correctly", run `sudo chown root:root node_modules/electron/dist/chrome-sandbox && sudo chmod 4755 node_modules/electron/dist/chrome-sandbox` (or use `npx electron --no-sandbox .` for local testing only)

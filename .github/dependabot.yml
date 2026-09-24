@@ -1,7 +1,9 @@
 version: 2
 updates:
   # npm packages: minor/patch updates grouped into one PR per week;
-  # major versions (e.g. a new Electron major) get their own PR
+  # major versions (e.g. a new Electron major) get their own PR.
+  # @xmpp/* is still 0.x, where a "minor" release can be breaking (0.14 changed the
+  # connection API), so it always gets its own PR.
   - package-ecosystem: npm
     directory: /
     schedule:
@@ -9,6 +11,7 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+        exclude-patterns: ["@xmpp/*"]
 
   # GitHub Actions used by the build workflow
   - package-ecosystem: github-actions

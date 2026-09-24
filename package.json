@@ -14,9 +14,10 @@
     "build:mac": "npm run icons && electron-builder --mac --publish never",
     "build:linux": "electron-builder --linux --publish never",
     "pack": "electron-builder --dir",
-    "test": "npm run test:node && npm run test:electron",
+    "test": "npm run test:node && npm run test:electron && npm run test:main",
     "test:node": "node --test \"test/node/**/*.test.js\"",
-    "test:electron": "electron --no-sandbox test/electron/run.js"
+    "test:electron": "electron --no-sandbox test/electron/run.js",
+    "test:main": "electron --no-sandbox test/electron/main-smoke.js"
   },
   "build": {
     "appId": "com.beetalk.app",
@@ -94,7 +95,7 @@
   },
   "dependencies": {
     "@xmpp/client": "^0.13.0",
-    "electron-store": "^8.1.0"
+    "electron-store": "^11.0.2"
   },
   "overrides": {
     "file-type": "^22.0.0"
