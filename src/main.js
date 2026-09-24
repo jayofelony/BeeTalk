@@ -9,6 +9,8 @@ try { keytar = require('keytar'); } catch {}
 
 const store = new Store();
 const KEYTAR_SERVICE = 'BeeTalk';
+const GSF_SERVER = 'goonfleet.com';
+const GSF_PORT = 5222;
 const OLD_KEYTAR_SERVICE = 'Gabber'; // for migration
 
 
@@ -106,12 +108,16 @@ function createWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      enableRemoteModule: false,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.js')
     },
     show: false,
     icon: windowIconPath
   });
+
+  // The window only ever shows index.html; links open in the system browser via 'open-link'
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', e => e.preventDefault());
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
   mainWindow.once('ready-to-show', () => mainWindow.show());
@@ -386,9 +392,13 @@ ipcMain.on('window-focus',    () => {
 });
 
 ipcMain.on('xmpp-connect', (e, account) => {
-  connectXmpp(account).catch(err => {
+  // Connect with the stored account, never the renderer's copy, so the renderer
+  // can't point a stored password at another server.
+  const stored = store.get('accounts', []).find(a => a.id === account?.id);
+  if (!stored) return;
+  connectXmpp({ ...stored, server: GSF_SERVER, port: GSF_PORT }).catch(err => {
     console.error('Connection error:', err);
-    send('xmpp-status', { id: account.id, status: 'error', error: err.message });
+    send('xmpp-status', { id: stored.id, status: 'error', error: err.message });
   });
 });
 ipcMain.on('xmpp-disconnect', (e, { id })  => destroyConnection(id));
@@ -537,7 +547,11 @@ ipcMain.on('xmpp-leave-room', (e, { accountId, roomJid, nick }) => {
 ipcMain.on('save-accounts', (e, accounts) => {
   // Save passwords encrypted and accounts (without passwords) to store.
   // Kept synchronous so the password is stored before a following xmpp-connect is handled.
+  if (!Array.isArray(accounts)) return;
+  accounts = accounts.filter(a => a && typeof a.id === 'string' && typeof a.username === 'string');
   for (const account of accounts) {
+    account.server = GSF_SERVER;
+    account.port = GSF_PORT;
     if (account.password) {
       savePassword(account.id, account.password);
       // Don't store password in plaintext
@@ -869,7 +883,7 @@ ipcMain.handle('discover-rooms', async (e, { accountId }) => {
 
   const xmpp = conn._xmpp;
   const account = conn.account;
-  const domain = account.server || 'goonfleet.com';
+  const domain = account.server || GSF_SERVER;
 
   // Try multiple MUC server variants (derive from account domain, with fallbacks)
   const mucServers = [

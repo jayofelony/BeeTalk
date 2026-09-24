@@ -113,17 +113,31 @@ function formatDay(ts) {
 function esc(s) {
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// Links are built as DOM nodes and opened through the data-action dispatcher,
+// never through inline handlers, so URL text can't break out into script.
+const URL_REGEX = /https?:\/\/[^\s<>"{}|\\^`\[\]]+/g;
+function appendLinkified(parent, text) {
+  let last = 0;
+  for (const m of text.matchAll(URL_REGEX)) {
+    if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const a = document.createElement('a');
+    a.href = '#';
+    a.className = 'msg-link';
+    a.textContent = m[0];
+    a.dataset.action = 'openExternalLink';
+    a.dataset.args = JSON.stringify([m[0]]);
+    parent.appendChild(a);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
 }
 function escapeAndLinkify(s) {
-  const escaped = esc(s);
-  const urlRegex = /(https?:\/\/[^\s<>"]+)/g;
-  return escaped.replace(urlRegex, (url) => {
-    return `<a href="#" onclick="openLink('${esc(url)}'); return false;" style="color: var(--accent); text-decoration: underline; cursor: pointer;">${esc(url)}</a>`;
-  });
-}
-function openLink(url) {
-  ipcRenderer.send('open-link', url);
+  const div = document.createElement('div');
+  appendLinkified(div, String(s));
+  return div.innerHTML;
 }
 function chatKey(accountId, jid) { return accountId + '::' + jid; }
 function bareJid(jid) { return jid ? jid.split('/')[0] : ''; }
@@ -143,6 +157,33 @@ function hideModal() {
   state.chatInfoModalKey = null;
 }
 window.hideModal = hideModal;
+
+// Click dispatcher for generated HTML: elements use data-action="fnName" and
+// data-args='[JSON]' instead of inline onclick, so the page can run with a CSP
+// that forbids inline script. Only functions listed here can be triggered.
+const UI_ACTIONS = new Set([
+  'addParticipantToContacts_Menu', 'checkForUpdate', 'copyMessage_Menu', 'deleteGroupConfirm',
+  'hideModal', 'insertEmoticon', 'joinMultipleRooms', 'joinSingleRoom', 'leaveRoomConfirm',
+  'moveContactToGroup', 'moveDMToGroup', 'moveRoomToGroup', 'openDirectMessageWithParticipant_Menu',
+  'openExternalLink', 'openGithubRelease', 'playAlarmSound', 'playDMSound', 'quoteMessage_Menu',
+  'removeAccount', 'removeContactConfirm', 'renameGroupModal', 'showCreateDMGroupModal',
+  'showCreateGroupModal', 'showCreateRoomGroupModal', 'showEditAccountModal', 'submitAccountSettings',
+  'submitAddAccount', 'submitCreateDMGroup', 'submitCreateGroup', 'submitCreateRoomGroup',
+  'submitDeleteActiveDM', 'submitDeleteGroup', 'submitEditAccount', 'submitJoinRoom',
+  'submitRemoveContact', 'submitRenameGroup', 'switchEmoticonFolder', 'toggleFavoriteEmoticon'
+]);
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (!el) return;
+  const name = el.dataset.action;
+  const fn = UI_ACTIONS.has(name) ? window[name] : null;
+  if (typeof fn !== 'function') return;
+  e.preventDefault();
+  let args = [];
+  try { args = el.dataset.args ? JSON.parse(el.dataset.args) : []; } catch { return; }
+  fn(...args);
+  if (el.dataset.close === 'modal') hideModal();
+});
 
 // ─────────────────────────────────────────────
 //  Idle Detection (Auto-away)
@@ -188,8 +229,8 @@ function showUpdateAvailableModal(updateInfo) {
       </div>
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Later</button>
-      <button class="btn-primary" onclick="openGithubRelease('${esc(updateInfo.releaseUrl)}')">Download Latest Version</button>
+      <button class="btn-secondary" data-action="hideModal">Later</button>
+      <button class="btn-primary" data-action="openGithubRelease" data-args="${esc(JSON.stringify([updateInfo.releaseUrl]))}">Download Latest Version</button>
     </div>
   `);
 }
@@ -569,9 +610,10 @@ function saveRoster(accountId, roster) {
 function renderAccountBar() {
   accountListEl.innerHTML = '';
   // Single-account mode: only offer add-account buttons when no account exists
-  const addDisplay = state.accounts.length > 0 ? 'none' : '';
-  $('btn-add-account').style.display = addDisplay;
-  $('btn-welcome-add').style.display = addDisplay;
+  // (both are display:none in styles.css, so they must be shown explicitly)
+  const noAccount = state.accounts.length === 0;
+  $('btn-add-account').style.display = noAccount ? 'flex' : 'none';
+  $('btn-welcome-add').style.display = noAccount ? 'inline-block' : 'none';
   const acct = getActiveAccount();
   if (!acct) return;
 
@@ -1314,11 +1356,11 @@ function showAddAccountModal() {
       </div>
     </div>
     <div style="color:var(--text3);font-size:12px;margin-top:12px;margin-bottom:12px">
-      Connects to goonfleet.com — <a href="#" style="color:var(--accent);text-decoration:underline;cursor:pointer;" onclick="openExternalLink('https://goonfleet.com/esa/'); return false;">Check username/password</a>
+      Connects to goonfleet.com — <a href="#" style="color:var(--accent);text-decoration:underline;cursor:pointer;" data-action="openExternalLink" data-args="${esc(JSON.stringify(['https://goonfleet.com/esa/']))}">Check username/password</a>
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary" onclick="submitAddAccount()">Connect</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary" data-action="submitAddAccount">Connect</button>
     </div>
   `);
   document.getElementById('fi-display-name').focus();
@@ -1364,9 +1406,9 @@ function showAccountContextMenu(acct) {
   showModal(`
     <div class="modal-title">${esc(acct.displayName || acct.username + '@' + acct.server)}</div>
     <div class="modal-actions" style="margin-top:16px">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary"   onclick="showEditAccountModal('${esc(acct.id)}')">Edit</button>
-      <button class="btn-danger"    onclick="removeAccount('${esc(acct.id)}')">Remove</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary"   data-action="showEditAccountModal" data-args="${esc(JSON.stringify([acct.id]))}">Edit</button>
+      <button class="btn-danger"    data-action="removeAccount" data-args="${esc(JSON.stringify([acct.id]))}">Remove</button>
     </div>
   `);
 }
@@ -1386,8 +1428,8 @@ window.showEditAccountModal = (id) => {
       <input class="form-input" id="fi-pass" type="password" placeholder="(unchanged)" />
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary"   onclick="submitEditAccount('${id}')">Save</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary"   data-action="submitEditAccount" data-args="${esc(JSON.stringify([id]))}">Save</button>
     </div>
   `);
 };
@@ -1431,7 +1473,7 @@ function showRoomContextMenu(chat, acct) {
   if (allGroupNames.length > 0) {
     groupOptions = allGroupNames.map(groupName => {
       const isInGroup = roomChatGroups.includes(groupName);
-      return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" onclick="moveRoomToGroup('${esc(acct.id)}','${esc(chat.jid)}','${esc(groupName)}','${esc(chat.name)}')">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
+      return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" data-action="moveRoomToGroup" data-args="${esc(JSON.stringify([acct.id, chat.jid, groupName, chat.name]))}">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
     }).join('');
   }
 
@@ -1440,9 +1482,9 @@ function showRoomContextMenu(chat, acct) {
     <p style="color:var(--text3);font-size:12px;margin-bottom:16px">${esc(chat.jid)}</p>
     ${groupOptions ? `<div style="display:grid;gap:8px;margin-bottom:16px;">${groupOptions}</div>` : ''}
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-secondary" onclick="showCreateRoomGroupModal('${esc(acct.id)}','${esc(chat.jid)}','${esc(chat.name)}')">+ Group</button>
-      <button class="btn-danger"    onclick="leaveRoomConfirm('${acct.id}','${chat.jid}')">Leave room</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-secondary" data-action="showCreateRoomGroupModal" data-args="${esc(JSON.stringify([acct.id, chat.jid, chat.name]))}">+ Group</button>
+      <button class="btn-danger"    data-action="leaveRoomConfirm" data-args="${esc(JSON.stringify([acct.id, chat.jid]))}">Leave room</button>
     </div>
   `);
 }
@@ -1455,7 +1497,7 @@ function showActiveDMContextMenu(chat, acct) {
 
   let groupOptions = allGroups.map(groupName => {
     const isInGroup = chatGroups.includes(groupName);
-    return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" onclick="moveDMToGroup('${esc(acct.id)}','${esc(chat.jid)}','${esc(groupName)}','${esc(chat.name)}')">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
+    return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" data-action="moveDMToGroup" data-args="${esc(JSON.stringify([acct.id, chat.jid, groupName, chat.name]))}">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
   }).join('');
 
   showModal(`
@@ -1463,9 +1505,9 @@ function showActiveDMContextMenu(chat, acct) {
     <p style="color:var(--text3);font-size:12px;margin-bottom:16px">${esc(chat.jid)}</p>
     ${groupOptions ? `<div style="display:grid;gap:8px;margin-bottom:16px;">${groupOptions}</div>` : ''}
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-secondary" onclick="showCreateDMGroupModal('${esc(acct.id)}','${esc(chat.jid)}','${esc(chat.name)}')">+ New Group</button>
-      <button class="btn-danger" onclick="submitDeleteActiveDM('${esc(chat.accountId)}','${esc(chat.jid)}','${esc(chat.name)}')">Delete</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-secondary" data-action="showCreateDMGroupModal" data-args="${esc(JSON.stringify([acct.id, chat.jid, chat.name]))}">+ New Group</button>
+      <button class="btn-danger" data-action="submitDeleteActiveDM" data-args="${esc(JSON.stringify([chat.accountId, chat.jid, chat.name]))}">Delete</button>
     </div>
   `);
 }
@@ -1478,7 +1520,7 @@ function showContactContextMenu(contact, acct) {
 
   let groupOptions = allGroups.map(groupName => {
     const isInGroup = contactGroups.includes(groupName);
-    return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" onclick="moveContactToGroup('${esc(acct.id)}','${esc(contact.jid)}','${esc(groupName)}','${esc(contact.name)}')">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
+    return `<button class="btn-group-option" style="${isInGroup ? 'opacity:0.5;' : ''}" data-action="moveContactToGroup" data-args="${esc(JSON.stringify([acct.id, contact.jid, groupName, contact.name]))}">${isInGroup ? '✓ ' : ''}${esc(groupName)}</button>`;
   }).join('');
 
   showModal(`
@@ -1488,9 +1530,9 @@ function showContactContextMenu(contact, acct) {
       ${groupOptions}
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary" onclick="showCreateGroupModal('${esc(acct.id)}','${esc(contact.jid)}','${esc(contact.name)}')">+ New Group</button>
-      <button class="btn-danger" onclick="removeContactConfirm('${esc(acct.id)}','${esc(contact.jid)}','${esc(contact.name)}')">Remove</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary" data-action="showCreateGroupModal" data-args="${esc(JSON.stringify([acct.id, contact.jid, contact.name]))}">+ New Group</button>
+      <button class="btn-danger" data-action="removeContactConfirm" data-args="${esc(JSON.stringify([acct.id, contact.jid, contact.name]))}">Remove</button>
     </div>
   `);
 }
@@ -1505,9 +1547,9 @@ function showGroupContextMenu(groupName, acct, groupType) {
     <div class="modal-title">Group: ${esc(groupName)}</div>
     <p style="color:var(--text3);font-size:12px;margin-bottom:16px">${groupType === 'contact' ? 'Contact group' : 'Room group'}</p>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-secondary" onclick="renameGroupModal('${esc(groupName)}','${esc(acct.id)}','${groupType}')">✏️ Rename</button>
-      <button class="btn-danger" onclick="deleteGroupConfirm('${esc(groupName)}','${esc(acct.id)}','${groupType}')">🗑️ Delete</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-secondary" data-action="renameGroupModal" data-args="${esc(JSON.stringify([groupName, acct.id, groupType]))}">✏️ Rename</button>
+      <button class="btn-danger" data-action="deleteGroupConfirm" data-args="${esc(JSON.stringify([groupName, acct.id, groupType]))}">🗑️ Delete</button>
     </div>
   `);
 }
@@ -1528,8 +1570,8 @@ window.renameGroupModal = (groupName, accountId, groupType) => {
       <input class="form-input" id="fi-rename-group" value="${esc(groupName)}" placeholder="Group name…" />
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary" onclick="submitRenameGroup('${esc(groupName)}','${esc(accountId)}','${groupType}')">Rename</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary" data-action="submitRenameGroup" data-args="${esc(JSON.stringify([groupName, accountId, groupType]))}">Rename</button>
     </div>
   `);
   document.getElementById('fi-rename-group').focus();
@@ -1604,7 +1646,7 @@ window.submitRenameGroup = (oldName, accountId, groupType) => {
   showModal(`
     <div class="modal-title">✓ Renamed</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Group renamed from "${esc(oldName)}" to "${esc(newName)}".</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -1639,8 +1681,8 @@ window.deleteGroupConfirm = (groupName, accountId, groupType) => {
       ${itemText}
     </p>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-danger" onclick="submitDeleteGroup('${esc(groupName)}','${esc(accountId)}','${groupType}')">Delete</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-danger" data-action="submitDeleteGroup" data-args="${esc(JSON.stringify([groupName, accountId, groupType]))}">Delete</button>
     </div>
   `);
 };
@@ -1692,7 +1734,7 @@ window.submitDeleteGroup = (groupName, accountId, groupType) => {
   showModal(`
     <div class="modal-title">✓ Deleted</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Group "${esc(groupName)}" has been deleted.</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -1714,10 +1756,10 @@ function showParticipantContextMenu(chat, nick) {
   const contextMenu = document.getElementById('context-menu');
   contextMenu.innerHTML = `
     <div style="padding: 6px 10px; font-size: 12px; color: var(--text3); border-bottom: 1px solid var(--border); margin-bottom: 4px;">${esc(displayName)}</div>
-    <div class="context-menu-item" onclick="openDirectMessageWithParticipant_Menu()">
+    <div class="context-menu-item" data-action="openDirectMessageWithParticipant_Menu">
       💬 Send DM
     </div>
-    <div class="context-menu-item" onclick="addParticipantToContacts_Menu()">
+    <div class="context-menu-item" data-action="addParticipantToContacts_Menu">
       ➕ Add to Contacts
     </div>
   `;
@@ -1770,10 +1812,10 @@ function showMessageSenderContextMenu(chat, msg) {
   const contextMenu = document.getElementById('context-menu');
   contextMenu.innerHTML = `
     <div style="padding: 6px 10px; font-size: 12px; color: var(--text3); border-bottom: 1px solid var(--border); margin-bottom: 4px;">${esc(displayName)}</div>
-    <div class="context-menu-item" onclick="openDirectMessageWithParticipant_Menu()">
+    <div class="context-menu-item" data-action="openDirectMessageWithParticipant_Menu">
       💬 Send DM
     </div>
-    <div class="context-menu-item" onclick="addParticipantToContacts_Menu()">
+    <div class="context-menu-item" data-action="addParticipantToContacts_Menu">
       ➕ Add to Contacts
     </div>
   `;
@@ -1789,10 +1831,10 @@ function showMessageContextMenu(msg) {
   
   const contextMenu = document.getElementById('context-menu');
   contextMenu.innerHTML = `
-    <div class="context-menu-item" onclick="quoteMessage_Menu()">
+    <div class="context-menu-item" data-action="quoteMessage_Menu">
       💬 Quote
     </div>
-    <div class="context-menu-item" onclick="copyMessage_Menu()">
+    <div class="context-menu-item" data-action="copyMessage_Menu">
       📋 Copy
     </div>
   `;
@@ -1935,8 +1977,8 @@ window.removeContactConfirm = (accountId, contactJid, contactName) => {
       Remove ${esc(contactName)} from your contacts?
     </p>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-danger" onclick="submitRemoveContact('${esc(accountId)}','${esc(contactJid)}','${esc(contactName)}')">Remove</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-danger" data-action="submitRemoveContact" data-args="${esc(JSON.stringify([accountId, contactJid, contactName]))}">Remove</button>
     </div>
   `);
 };
@@ -1967,7 +2009,7 @@ window.submitRemoveContact = (accountId, contactJid, contactName) => {
   showModal(`
     <div class="modal-title">✓ Removed</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">${esc(contactName)} has been removed from your contacts.</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -1994,7 +2036,7 @@ window.submitDeleteActiveDM = (accountId, chatJid, chatName) => {
   showModal(`
     <div class="modal-title">✓ Deleted</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Conversation with ${esc(chatName)} has been deleted.</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -2032,7 +2074,7 @@ window.moveContactToGroup = (accountId, contactJid, groupName, contactName) => {
   showModal(`
     <div class="modal-title">✓ Updated</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">${esc(contactName)} moved to group(s).</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -2048,8 +2090,8 @@ window.showCreateGroupModal = (accountId, contactJid, contactName) => {
       <input class="form-input" id="fi-group-name" placeholder="e.g. Friends, Work…" />
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary" onclick="submitCreateGroup('${esc(accountId)}','${esc(contactJid)}','${esc(contactName)}')">Create & Add</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary" data-action="submitCreateGroup" data-args="${esc(JSON.stringify([accountId, contactJid, contactName]))}">Create & Add</button>
     </div>
   `);
   document.getElementById('fi-group-name').focus();
@@ -2120,7 +2162,7 @@ window.moveDMToGroup = (accountId, dmJid, groupName, dmName) => {
   showModal(`
     <div class="modal-title">✓ Updated</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">DM with ${esc(dmName)} group updated.</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -2136,8 +2178,8 @@ window.showCreateDMGroupModal = (accountId, dmJid, dmName) => {
       <input class="form-input" id="fi-dm-group-name" placeholder="e.g. Friends, Work…" />
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary" onclick="submitCreateDMGroup('${esc(accountId)}','${esc(dmJid)}','${esc(dmName)}')">Create & Add</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary" data-action="submitCreateDMGroup" data-args="${esc(JSON.stringify([accountId, dmJid, dmName]))}">Create & Add</button>
     </div>
   `);
   document.getElementById('fi-dm-group-name').focus();
@@ -2202,7 +2244,7 @@ window.moveRoomToGroup = (accountId, roomJid, groupName, roomName) => {
   showModal(`
     <div class="modal-title">✓ Updated</div>
     <p style="color:var(--text3);font-size:13px;margin-bottom:16px">${esc(roomName)} room group updated.</p>
-    <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+    <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
   `);
 };
 
@@ -2218,8 +2260,8 @@ window.showCreateRoomGroupModal = (accountId, roomJid, roomName) => {
       <input class="form-input" id="fi-room-group-name" placeholder="e.g. Gaming, Work, Social…" />
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary" onclick="submitCreateRoomGroup('${esc(accountId)}','${esc(roomJid)}','${esc(roomName)}')">Create & Add</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary" data-action="submitCreateRoomGroup" data-args="${esc(JSON.stringify([accountId, roomJid, roomName]))}">Create & Add</button>
     </div>
   `);
   document.getElementById('fi-room-group-name').focus();
@@ -2264,7 +2306,7 @@ function showJoinRoomModal() {
     showModal(`
       <div class="modal-title">Not connected</div>
       <p style="color:var(--text3);font-size:13px;margin-bottom:16px">You need to be connected to join a room.</p>
-      <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+      <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
     `);
     return;
   }
@@ -2279,8 +2321,8 @@ function showJoinRoomModal() {
       Joins: room@conference.goonfleet.com
     </div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary"   onclick="submitJoinRoom()">Join</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary"   data-action="submitJoinRoom">Join</button>
     </div>
   `);
   document.getElementById('fi-room').focus();
@@ -2358,12 +2400,12 @@ function showAccountSettingsModal() {
       <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
         <input type="checkbox" id="fi-alarm-enabled" ${alarmEnabled ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
         <label for="fi-alarm-enabled" style="cursor: pointer; margin: 0;">Play alarm for Directorbot messages</label>
-        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: auto;" onclick="playAlarmSound()">Test</button>
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: auto;" data-action="playAlarmSound">Test</button>
       </div>
       <div class="form-group" style="display: flex; align-items: center; gap: 10px;">
         <input type="checkbox" id="fi-dm-sound-enabled" ${dmSoundEnabled ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;" />
         <label for="fi-dm-sound-enabled" style="cursor: pointer; margin: 0;">Play sound for direct messages</label>
-        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: auto;" onclick="playDMSound()">Test</button>
+        <button class="btn-secondary" style="padding: 4px 8px; font-size: 11px; margin-left: auto;" data-action="playDMSound">Test</button>
       </div>
     </div>
 
@@ -2371,7 +2413,7 @@ function showAccountSettingsModal() {
       <div style="font-weight: 500; margin-bottom: 12px; font-size: 12px; color: var(--text2); text-transform: uppercase;">Updates</div>
       ${appVersion ? `<div style="font-size: 11px; color: var(--text3); margin-bottom: 8px;">Current version: <strong style="color: var(--text1);">v${appVersion}</strong></div>` : ''}
       <div class="form-group" style="display: flex; gap: 8px; align-items: center;">
-        <button class="btn-secondary" id="update-check-btn" onclick="checkForUpdate()">Check for Updates</button>
+        <button class="btn-secondary" id="update-check-btn" data-action="checkForUpdate">Check for Updates</button>
         <span id="update-status" style="font-size: 12px; color: var(--text2);"></span>
       </div>
       <div id="update-spinner" style="display: none; margin-top: 8px;">
@@ -2382,8 +2424,8 @@ function showAccountSettingsModal() {
     </div>
 
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Cancel</button>
-      <button class="btn-primary"   onclick="submitAccountSettings()">Save</button>
+      <button class="btn-secondary" data-action="hideModal">Cancel</button>
+      <button class="btn-primary"   data-action="submitAccountSettings">Save</button>
     </div>
   `);
 }
@@ -2466,7 +2508,7 @@ function showChatInfoModal() {
       ` : ''}
     </div>
     <div class="modal-actions">
-      <button class="btn-primary" onclick="hideModal()">Close</button>
+      <button class="btn-primary" data-action="hideModal">Close</button>
     </div>
   `);
 
@@ -2519,12 +2561,12 @@ window.checkForUpdate = async () => {
       message.style.display = 'block';
       message.innerHTML = `
         <div style="margin-bottom: 8px;">
-          ⬆ Update available: <strong>${result.version}</strong>
+          ⬆ Update available: <strong>${esc(result.version)}</strong>
         </div>
         <div style="font-size: 11px; margin-bottom: 8px; color: var(--text2); max-height: 100px; overflow-y: auto;">
-          ${result.releaseNotes.replace(/\n/g, '<br>')}
+          ${esc(result.releaseNotes).replace(/\n/g, '<br>')}
         </div>
-        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" onclick="openExternalLink('${esc(result.releaseUrl)}'); return false;">Download from GitHub</button>
+        <button class="btn-primary" style="font-size: 11px; padding: 4px 8px;" data-action="openExternalLink" data-args="${esc(JSON.stringify([result.releaseUrl]))}">Download from GitHub</button>
       `;
       message.style.backgroundColor = 'rgba(33, 150, 243, 0.1)';
       message.style.color = '#2196F3';
@@ -2657,7 +2699,10 @@ function loadActiveDMs(accountId) {
 
 async function loadAndConnect() {
   const saved = await ipcRenderer.invoke('load-accounts');
-  if (!saved?.length) return;
+  if (!saved?.length) {
+    renderAccountBar();  // first run: show the add-account buttons
+    return;
+  }
   saved.forEach(data => {
     const acct = { ...data, status: 'offline', roster: {}, presence: 'available', jid: data.username + '@' + data.server, groups: {}, roomGroups: {} };
 
@@ -2719,9 +2764,9 @@ function setTheme(themeName) {
 //  Message Sanitization & Rendering
 //  ─────────────────────────────────────────────
 function sanitizeMessageHTML(html) {
-  // Create a temporary container
-  const temp = document.createElement('div');
-  temp.innerHTML = html;
+  // Parse into an inert document: unlike a detached <div>, nothing in it loads
+  // or runs (e.g. <img onerror>) before the allow-list below is applied.
+  const temp = new DOMParser().parseFromString(html, 'text/html').body;
 
   // Allowed tags and their allowed attributes
   const allowed = {
@@ -2825,44 +2870,41 @@ function applyEmoticons(element) {
     }
   }
 
+  // Build nodes directly: the text node holds decoded message text, so it must
+  // never be passed through innerHTML.
   nodesToReplace.forEach(node => {
-    const span = document.createElement('span');
-    let html = node.nodeValue;
-    emoticonsList.forEach((e, idx) => {
-      const regex = new RegExp(`__EMOTICON_${idx}__`, 'g');
-      html = html.replace(regex, `<img class="emoticon" src="${esc(e.path)}" alt="${esc(e.name)}" title="${esc(e.name)}" />`);
+    const frag = document.createDocumentFragment();
+    node.nodeValue.split(/(__EMOTICON_\d+__)/).forEach(part => {
+      const m = part.match(/^__EMOTICON_(\d+)__$/);
+      const e = m && emoticonsList[Number(m[1])];
+      if (e) {
+        const img = document.createElement('img');
+        img.className = 'emoticon';
+        img.src = e.path;
+        img.alt = img.title = e.name;
+        frag.appendChild(img);
+      } else if (part) {
+        frag.appendChild(document.createTextNode(part));
+      }
     });
-    span.innerHTML = html;
-    node.parentNode.replaceChild(span, node);
+    node.parentNode.replaceChild(frag, node);
   });
 }
 
 function linkifyUrls(element) {
-  const urlRegex = /(https?:\/\/[^\s<>"{}|\\^`\[\]]*)/g;
-  const walker = document.createTreeWalker(
-    element,
-    NodeFilter.SHOW_TEXT,
-    null,
-    false
-  );
-
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
   const nodesToProcess = [];
   let node;
   while (node = walker.nextNode()) {
-    if (urlRegex.test(node.nodeValue)) {
-      nodesToProcess.push(node);
-      urlRegex.lastIndex = 0; // Reset regex after test
-    }
+    URL_REGEX.lastIndex = 0;
+    if (!node.parentElement.closest('a') && URL_REGEX.test(node.nodeValue)) nodesToProcess.push(node);
   }
+  URL_REGEX.lastIndex = 0;
 
   nodesToProcess.forEach(node => {
-    const span = document.createElement('span');
-    let html = esc(node.nodeValue);
-    html = html.replace(/(https?:\/\/[^\s&<>"]*)/g, (url) => {
-      return `<a onclick="event.preventDefault(); event.stopPropagation(); openExternalLink('${esc(url)}'); return false;" style="color: var(--accent); text-decoration: underline; cursor: pointer;">${esc(url)}</a>`;
-    });
-    span.innerHTML = html;
-    node.parentNode.replaceChild(span, node);
+    const frag = document.createDocumentFragment();
+    appendLinkified(frag, node.nodeValue);
+    node.parentNode.replaceChild(frag, node);
   });
 }
 
@@ -2885,13 +2927,30 @@ function toggleFavoriteEmoticon(name) {
   showEmoticonPicker();
 }
 
+// One emoticon tile in the picker; hover styling lives in styles.css (.emoticon-tile)
+function emoticonTileHtml(e, isFavorite) {
+  return `
+    <div class="emoticon-tile" data-action="insertEmoticon" data-args="${esc(JSON.stringify([e.name]))}" data-close="modal"
+      data-name="${esc(e.name)}" title="${esc(e.name)}">
+      <img src="${esc(e.path)}" loading="lazy" />
+      <div class="emoticon-favorite-btn" data-action="toggleFavoriteEmoticon" data-args="${esc(JSON.stringify([e.name]))}"
+        title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
+    </div>
+  `;
+}
+
+function emoticonGridHtml(list) {
+  const favorites = getAppSettings().favoriteEmoticons || [];
+  return (list || []).map(e => emoticonTileHtml(e, favorites.includes(e.name))).join('');
+}
+
 function showEmoticonPicker() {
   if (!Object.keys(emoticons).length) {
     showModal(`
       <div class="modal-title">Emoticons</div>
       <p style="color: var(--text3); text-align: center; padding: 20px;">Loading emoticons...</p>
       <div class="modal-actions">
-        <button class="btn-secondary" onclick="hideModal()">Close</button>
+        <button class="btn-secondary" data-action="hideModal">Close</button>
       </div>
     `);
     return;
@@ -2901,53 +2960,17 @@ function showEmoticonPicker() {
   const recent = settings.recentEmoticons || [];
   const favorites = settings.favoriteEmoticons || [];
   const folders = Object.keys(emoticons);
+  const byName = name => emoticonsList.find(e => e.name === name);
 
   let html = `<div class="modal-title">Emoticons</div>`;
 
-  // Recent tab
-  if (recent.length > 0) {
-    html += `<div style="margin-bottom: 12px;">
-      <div style="font-size: 12px; color: var(--text2); margin-bottom: 8px; text-transform: uppercase;">Recent</div>
-      <div style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; margin-bottom: 16px; padding: 8px; background: var(--bg2); border-radius: var(--radius);">
-        ${recent.map(name => {
-          const emoticon = emoticonsList.find(e => e.name === name);
-          const isFavorite = favorites.includes(name);
-          return emoticon ? `
-            <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
-              onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
-              onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
-              onclick="insertEmoticon('${esc(name)}'); hideModal();"
-              title="${esc(name)}">
-              <img src="${emoticon.path}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
-              <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
-            </div>
-          ` : '';
-        }).join('')}
-      </div>
+  const section = (title, list) => `<div style="margin-bottom: 12px;">
+      <div style="font-size: 12px; color: var(--text2); margin-bottom: 8px; text-transform: uppercase;">${title}</div>
+      <div class="emoticon-grid" style="margin-bottom: 16px;">${emoticonGridHtml(list)}</div>
     </div>`;
-  }
 
-  // Favorites tab
-  if (favorites.length > 0) {
-    html += `<div style="margin-bottom: 12px;">
-      <div style="font-size: 12px; color: var(--text2); margin-bottom: 8px; text-transform: uppercase;">Favorites</div>
-      <div style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; margin-bottom: 16px; padding: 8px; background: var(--bg2); border-radius: var(--radius);">
-        ${favorites.map(name => {
-          const emoticon = emoticonsList.find(e => e.name === name);
-          return emoticon ? `
-            <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
-              onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
-              onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
-              onclick="insertEmoticon('${esc(name)}'); hideModal();"
-              title="${esc(name)}">
-              <img src="${emoticon.path}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
-              <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(name)}')" title="Toggle favorite">★</div>
-            </div>
-          ` : '';
-        }).join('')}
-      </div>
-    </div>`;
-  }
+  if (recent.length > 0) html += section('Recent', recent.map(byName).filter(Boolean));
+  if (favorites.length > 0) html += section('Favorites', favorites.map(byName).filter(Boolean));
 
   // Search
   html += `<div style="margin-bottom: 12px;">
@@ -2958,33 +2981,19 @@ function showEmoticonPicker() {
   html += `<div style="margin-bottom: 12px;">
     <div style="display: flex; gap: 8px; margin-bottom: 8px; border-bottom: 1px solid var(--border); padding-bottom: 8px; flex-wrap: wrap;">
       ${folders.map((folder, idx) => `
-        <button style="padding: 6px 12px; border: none; background: ${idx === 0 ? 'var(--accent)' : 'var(--bg2)'}; color: var(--text1); border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;"
-          onclick="switchEmoticonFolder('${folder}', event)"
-          data-folder="${folder}">${esc(folder)}</button>
+        <button class="emoticon-folder-btn${idx === 0 ? ' active' : ''}"
+          data-action="switchEmoticonFolder" data-args="${esc(JSON.stringify([folder]))}"
+          data-folder="${esc(folder)}">${esc(folder)}</button>
       `).join('')}
     </div>
-    <div id="emoticon-grid" style="display: grid; grid-template-columns: repeat(8, 1fr); gap: 8px; padding: 8px; background: var(--bg2); border-radius: var(--radius); max-height: 400px; overflow-y: auto;">
-      ${emoticons[folders[0]]?.map(e => {
-        const favorites = (getAppSettings().favoriteEmoticons || []);
-        const isFavorite = favorites.includes(e.name);
-        return `
-        <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
-          onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
-          onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
-          onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
-          data-name="${esc(e.name)}"
-          title="${esc(e.name)}">
-          <img src="${esc(e.path)}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
-          <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
-        </div>
-      `;
-      }).join('') || ''}
+    <div id="emoticon-grid" class="emoticon-grid" style="max-height: 400px; overflow-y: auto;">
+      ${emoticonGridHtml(emoticons[folders[0]])}
     </div>
   </div>`;
 
   html += `
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Close</button>
+      <button class="btn-secondary" data-action="hideModal">Close</button>
     </div>
   `;
 
@@ -2995,70 +3004,23 @@ function showEmoticonPicker() {
     searchInput.addEventListener('input', (e) => {
       const query = e.target.value.toLowerCase();
       const grid = document.getElementById('emoticon-grid');
-
       if (query === '') {
-        const activeFolder = document.querySelector('[data-folder][style*="var(--accent)"]')?.dataset.folder || folders[0];
-        grid.innerHTML = emoticons[activeFolder]?.map(e => {
-          const favorites = (getAppSettings().favoriteEmoticons || []);
-          const isFavorite = favorites.includes(e.name);
-          return `
-          <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
-            onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
-            onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
-            onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
-            data-name="${esc(e.name)}"
-            title="${esc(e.name)}">
-            <img src="${esc(e.path)}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
-            <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
-          </div>
-        `;
-        }).join('') || ''
+        const activeFolder = document.querySelector('.emoticon-folder-btn.active')?.dataset.folder || folders[0];
+        grid.innerHTML = emoticonGridHtml(emoticons[activeFolder]);
       } else {
-        const filtered = emoticonsList.filter(e => e.name.toLowerCase().includes(query));
-        grid.innerHTML = filtered.map(e => {
-          const favorites = (getAppSettings().favoriteEmoticons || []);
-          const isFavorite = favorites.includes(e.name);
-          return `
-          <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
-            onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
-            onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
-            onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
-            data-name="${esc(e.name)}"
-            title="${esc(e.name)}">
-            <img src="${esc(e.path)}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
-          <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
-          </div>
-        `;
-        }).join('');
+        grid.innerHTML = emoticonGridHtml(emoticonsList.filter(e => e.name.toLowerCase().includes(query)));
       }
     });
     searchInput.focus();
   }
 }
 
-function switchEmoticonFolder(folder, event) {
-  const folders = Object.keys(emoticons);
-  const grid = event.target.parentElement.nextElementSibling;
-
-  event.target.parentElement.querySelectorAll('button').forEach(btn => {
-    btn.style.background = btn.dataset.folder === folder ? 'var(--accent)' : 'var(--bg2)';
+function switchEmoticonFolder(folder) {
+  document.querySelectorAll('.emoticon-folder-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.folder === folder);
   });
-
-  grid.innerHTML = emoticons[folder]?.map(e => {
-    const favorites = (getAppSettings().favoriteEmoticons || []);
-    const isFavorite = favorites.includes(e.name);
-    return `
-    <div style="position: relative; cursor: pointer; border-radius: 4px; padding: 4px; display: flex; align-items: center; justify-content: center; background: var(--bg3); transition: all 0.2s ease; user-select: none; overflow: visible;"
-      onmouseenter="this.style.transform='scale(1.3)'; this.style.zIndex='10'; this.style.background='var(--accent)'; this.querySelector('.emoticon-favorite-btn').style.opacity='1'; this.querySelector('.emoticon-favorite-btn').style.color='#FFED4E';"
-      onmouseleave="this.style.transform='scale(1)'; this.style.zIndex='auto'; this.style.background='var(--bg3)'; this.querySelector('.emoticon-favorite-btn').style.opacity='0'; this.querySelector('.emoticon-favorite-btn').style.color='#FFD700';"
-      onclick="insertEmoticon('${esc(e.name)}'); hideModal();"
-      data-name="${esc(e.name)}"
-      title="${esc(e.name)}">
-      <img src="${e.path}" style="width: 24px; height: 24px; object-fit: contain; pointer-events: none;" loading="lazy" />
-      <div style="position: absolute; top: 0; right: 0; cursor: pointer; font-size: 14px; opacity: 0; transition: opacity 0.2s; background: rgba(0,0,0,0.7); border-radius: 50%; width: 18px; height: 18px; display: flex; align-items: center; justify-content: center; line-height: 1; color: #FFD700;" class="emoticon-favorite-btn" onclick="event.stopPropagation(); toggleFavoriteEmoticon('${esc(e.name)}')" title="Toggle favorite">${isFavorite ? '★' : '☆'}</div>
-    </div>
-  `;
-  }).join('') || ''
+  const grid = document.getElementById('emoticon-grid');
+  if (grid) grid.innerHTML = emoticonGridHtml(emoticons[folder]);
 }
 
 function addRecentEmoticon(name) {
@@ -3200,8 +3162,8 @@ function showBrowseRoomsModal() {
     </div>
     <div id="rooms-list" style="display: none;"></div>
     <div class="modal-actions">
-      <button class="btn-secondary" onclick="hideModal()">Close</button>
-      <button class="btn-primary" id="btn-join-selected" onclick="joinMultipleRooms()" style="display: none;">Join Selected</button>
+      <button class="btn-secondary" data-action="hideModal">Close</button>
+      <button class="btn-primary" id="btn-join-selected" data-action="joinMultipleRooms" style="display: none;">Join Selected</button>
     </div>
   `);
 
@@ -3256,13 +3218,13 @@ async function discoverRooms(accountId) {
     searchHtml += '<div id="rooms-container" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 12px;">';
     rooms.forEach((room, idx) => {
       searchHtml += `
-        <div class="room-item" data-name="${room.name.toLowerCase()}" data-jid="${room.jid.toLowerCase()}" style="padding: 12px; border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center;">
+        <div class="room-item" data-name="${esc(room.name.toLowerCase())}" data-jid="${esc(room.jid.toLowerCase())}" style="padding: 12px; border-bottom: 1px solid var(--border); display: flex; gap: 12px; align-items: center;">
           <input type="checkbox" class="room-checkbox" data-jid="${esc(room.jid)}" data-name="${esc(room.name)}" style="width: 18px; height: 18px; cursor: pointer;" />
           <div style="flex: 1; min-width: 0;">
             <div style="font-weight: 500; color: var(--text1);">#${esc(room.name)}</div>
             <div style="font-size: 12px; color: var(--text3);">${esc(room.jid)}</div>
           </div>
-          <button class="btn-primary" style="padding: 6px 12px; font-size: 12px; white-space: nowrap;" onclick="joinSingleRoom('${esc(room.jid)}', '${esc(room.name)}')">Join</button>
+          <button class="btn-primary" style="padding: 6px 12px; font-size: 12px; white-space: nowrap;" data-action="joinSingleRoom" data-args="${esc(JSON.stringify([room.jid, room.name]))}">Join</button>
         </div>
       `;
     });
@@ -3435,7 +3397,7 @@ if (newContactInput) {
         showModal(`
           <div class="modal-title">Error</div>
           <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Please enter a username.</p>
-          <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+          <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
         `);
         return;
       }
@@ -3445,13 +3407,13 @@ if (newContactInput) {
         showModal(`
           <div class="modal-title">Error</div>
           <p style="color:var(--text3);font-size:13px;margin-bottom:16px">No active account selected.</p>
-          <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+          <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
         `);
         return;
       }
 
-      // Append @goonfleet if not already present
-      const jid = username.includes('@') ? username : username + '@goonfleet';
+      // Append @goonfleet.com if not already present
+      const jid = username.includes('@') ? username : username + '@goonfleet.com';
       const displayName = username.split('@')[0];
 
       // Add contact via XMPP
@@ -3470,7 +3432,7 @@ if (newContactInput) {
       showModal(`
         <div class="modal-title">✓ Added</div>
         <p style="color:var(--text3);font-size:13px;margin-bottom:16px">Subscription request sent to ${esc(displayName)}.</p>
-        <div class="modal-actions"><button class="btn-secondary" onclick="hideModal()">OK</button></div>
+        <div class="modal-actions"><button class="btn-secondary" data-action="hideModal">OK</button></div>
       `);
     }
   });
