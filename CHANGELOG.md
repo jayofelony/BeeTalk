@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.15] - 2026-09-24
+
+### Fixed
+- After a short connection drop, BeeTalk stayed "Disconnected — reconnecting…" and couldn't send messages even though the server had resumed the session (since 1.0.12)
+- A dead connection (e.g. after sleep) is detected within about a minute and reconnected
+- Replies to room private messages from nicks with spaces were dropped
+- A wrong password was reported twice
+- Roster updates are only accepted from your own server
+
+### Added
+- Message history is kept much longer (IndexedDB): all DMs and Directorbot pings, 5000 messages per room. goonfleet.com keeps no server archive, so this is the only history
+- "Load older messages" and search within a chat (🔍 or Ctrl+Shift+F)
+- Messages sent or received on your other devices appear in BeeTalk (message carbons)
+- Typing indicators in DMs
+- Mentions of your nick are highlighted in rooms; a "New messages" line marks where you left off
+- Rooms ask the server for all missed join history (up to 1000 messages) instead of 50
+
+### Changed
+- Electron 44 (41 is no longer supported and had known security issues); all npm audit findings fixed
+- "Launch at startup" starts BeeTalk in the tray
+- Automated tests run on every push; releases only build when they pass
+- macOS: OS notifications need a code-signed build since Electron 43; the macOS build is unsigned
+
 ## [1.0.14] - 2026-09-24
 
 ### Changed
