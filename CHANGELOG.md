@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.13] - 2026-09-24
+
+### Changed
+- New high-resolution app icon (the army-helmet bee) on Windows, macOS, Linux and in the system tray
+- "Check username/password" in the Add Account dialog opens the GSF service password page
+
+### Fixed
+- Linux: the dock showed a generic icon instead of the BeeTalk icon
+- Releases contained every installer twice
+
 ## [1.0.12] - 2026-09-24
 
 ### Security
