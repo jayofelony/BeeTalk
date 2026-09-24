@@ -25,7 +25,7 @@ jobs:
         run: npm ci --omit=optional
 
       - name: Build Linux
-        run: npm run build:linux -- --publish never
+        run: npm run build:linux
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -53,7 +53,7 @@ jobs:
         run: npm ci
 
       - name: Build macOS
-        run: npm run build:mac -- --publish never
+        run: npm run build:mac
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -80,7 +80,7 @@ jobs:
         run: npm ci
 
       - name: Build Windows
-        run: npm run build:win -- --publish never
+        run: npm run build:win
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

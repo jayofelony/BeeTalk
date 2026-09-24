@@ -39,6 +39,7 @@
       "icon": "assets/icon.ico"
     },
     "nsis": {
+      "artifactName": "BeeTalk-Setup-${version}.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
