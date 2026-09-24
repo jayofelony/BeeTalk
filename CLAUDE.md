@@ -93,7 +93,7 @@ Changes flow: main process → renderer via IPC events → state mutations → D
 
 ### Messages, History & Notifications
 
-- Rooms request history on join; on rejoin `since` is set from the last known message, and replayed messages that match an existing one (`isDuplicateMessage`) are skipped.
+- Rooms have no archive on goonfleet.com; join history is all the server offers. Joins ask for up to 1000 messages `since` the last known message (first join: last day); the server sends at most what it keeps. Replayed messages that match an existing one (`isDuplicateMessage`) are skipped.
 - DM history comes from the server archive (XEP-0313) when a DM is opened and is merged into the chat.
 - Messages are rendered in batches (`RENDER_BATCH_SIZE = 50`); rooms show at most `MAX_DISPLAYED_MESSAGES_ROOM = 500` in the DOM.
 - The renderer decides on notifications (`notifyIfNeeded`): DMs, Directorbot and mentions of your nick; never for history, your own messages or Do Not Disturb.
@@ -102,7 +102,8 @@ Changes flow: main process → renderer via IPC events → state mutations → D
 
 - **Account**: `electron-store` (`accounts`), without password
 - **Password**: encrypted with `safeStorage` and stored as base64 in `electron-store` under `passwords[accountId]`
-- **Rooms, roster, groups, chat state, messages, settings**: renderer `localStorage` (`rooms_*`, `roster_*`, `chat_*`, `chat_messages_*`, `appSettings`). Messages are saved at most every 3 s per chat, 200 per room / 500 per DM
+- **Message history**: IndexedDB `beetalk-history` (store `messages`, index `chat_ts` on `[chat key, ts]`), see "Message history" in `src/app.js`. goonfleet.com has no server archive for accounts or rooms, so this is the only history. Messages are written as they arrive (one transaction per burst, no timers: hidden windows throttle them). Startup preloads the newest 300 per chat; "Load older messages" pages in more; in-chat search (Ctrl+Shift+F) covers everything stored. Rooms are pruned to 5000 messages, DMs and Directorbot are kept. Old `chat_messages_*` localStorage history is migrated once
+- **Rooms, roster, groups, chat state, settings**: renderer `localStorage` (`rooms_*`, `roster_*`, `chat_*`, `appSettings`)
 - **Server**: `goonfleet.com` (`GSF_SERVER` in `src/main.js`)
 
 ### Idle Detection & Auto-Away

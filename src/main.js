@@ -551,11 +551,12 @@ ipcMain.on('xmpp-join-room', (e, { accountId, roomJid, nick, since }) => {
     return;
   }
 
-  // Join with history request: only what we missed if we know our last message
-  // (`since`), otherwise the last hour. Max 50 messages / 100KB either way.
+  // Join history is the only room history goonfleet.com offers (rooms have no
+  // archive). Ask for everything since our last message, or the last day on a
+  // first join; the server sends at most what it keeps, so the cap is generous.
   const history = typeof since === 'string' && !isNaN(Date.parse(since))
-    ? { maxstanzas: '50', maxchars: '102400', since }
-    : { maxstanzas: '50', maxchars: '102400', seconds: '3600' };
+    ? { maxstanzas: '1000', since }
+    : { maxstanzas: '1000', seconds: '86400' };
   c._xmpp.send(
     xml('presence', { to: `${roomJid}/${nick}` },
       xml('x', { xmlns: 'http://jabber.org/protocol/muc' },
