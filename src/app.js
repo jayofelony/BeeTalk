@@ -421,10 +421,13 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed })
       notifyIfNeeded(key, `${chat.name} / ${nick}`, body);
     }
   } else {
-    const key = chatKey(accountId, senderBareJid);
+    // A private message from a room participant comes from room@conference/nick
+    const isRoomPM = state.chats[chatKey(accountId, senderBareJid)]?.type === 'room';
+    const dmJid = isRoomPM ? from : senderBareJid;
+    const key = chatKey(accountId, dmJid);
     const acct = state.accounts.find(a => a.id === accountId);
-    const displayName = acct?.roster?.[senderBareJid]?.name || senderName;
-    ensureChat(key, { type: 'dm', name: displayName, jid: senderBareJid, accountId });
+    const displayName = isRoomPM ? (from.split('/')[1] || '?') : (acct?.roster?.[senderBareJid]?.name || senderName);
+    ensureChat(key, { type: 'dm', name: displayName, jid: dmJid, accountId });
     const msg = { from: displayName, text: body, ts, me: false };
     if (delayed && isDuplicateMessage(state.chats[key], msg)) return;
     pushMessage(key, msg);
@@ -1078,7 +1081,7 @@ function renderRoomList(acct) {
 // ─────────────────────────────────────────────
 //  Chat open / render
 // ─────────────────────────────────────────────
-function openChat(key) {
+function openChat(key, loadHistory = true) {
   state.activeChatKey = key;
   const chat = state.chats[key];
   if (!chat) return;
@@ -1120,8 +1123,8 @@ function openChat(key) {
     document.getElementById('contacts-panel').classList.add('active');
   }
 
-  // Load MAM history for DMs (always reload to get archived messages)
-  if (!isRoom) {
+  // Fetch archived DM history; it re-renders this chat when it arrives
+  if (!isRoom && loadHistory) {
     loadMessageHistory(key);
   }
 
@@ -1780,29 +1783,38 @@ window.submitDeleteGroup = (groupName, accountId, groupType) => {
 
 
 
-function showParticipantContextMenu(chat, nick) {
-  const acct = state.accounts.find(a => a.id === chat.accountId);
-  if (!acct) return;
+// Where to reach a room participant: their real JID if the room shares it,
+// otherwise a MUC private message to room@conference/nick.
+function participantJids(chat, nick) {
+  const partData = chat.participants?.[nick];
+  const realJid = (typeof partData === 'object' && partData?.mucJid) ? bareJid(partData.mucJid) : null;
+  return { realJid, dmJid: realJid || `${chat.jid}/${nick}` };
+}
 
-  const partData = chat.participants[nick];
-  const mucJid = (typeof partData === 'object') ? partData?.mucJid : null;
-  const rawJid = mucJid || (nick.toLowerCase() + '@' + chat.jid.split('@')[1]);
-  const displayJid = bareJid(rawJid);
-  const displayName = nick;
-
-  // Store data globally for context menu callbacks
-  window._contextMenuData = { chat, nick, displayJid, displayName, acct };
-
-  const contextMenu = document.getElementById('context-menu');
-  contextMenu.innerHTML = `
+function participantMenuHtml(displayName, realJid) {
+  return `
     <div style="padding: 6px 10px; font-size: 12px; color: var(--text3); border-bottom: 1px solid var(--border); margin-bottom: 4px;">${esc(displayName)}</div>
     <div class="context-menu-item" data-action="openDirectMessageWithParticipant_Menu">
       💬 Send DM
     </div>
-    <div class="context-menu-item" data-action="addParticipantToContacts_Menu">
+    ${realJid ? `<div class="context-menu-item" data-action="addParticipantToContacts_Menu">
       ➕ Add to Contacts
-    </div>
+    </div>` : ''}
   `;
+}
+
+function showParticipantContextMenu(chat, nick) {
+  const acct = state.accounts.find(a => a.id === chat.accountId);
+  if (!acct) return;
+
+  const { realJid, dmJid: displayJid } = participantJids(chat, nick);
+  const displayName = nick;
+
+  // Store data globally for context menu callbacks
+  window._contextMenuData = { chat, nick, displayJid, realJid, displayName, acct };
+
+  const contextMenu = document.getElementById('context-menu');
+  contextMenu.innerHTML = participantMenuHtml(displayName, realJid);
   
   showContextMenu(window.currentContextEvent);
 }
@@ -1821,11 +1833,12 @@ window.openDirectMessageWithParticipant_Menu = () => {
 window.addParticipantToContacts_Menu = () => {
   const data = window._contextMenuData;
   if (!data) return;
-  const { displayJid, displayName, acct } = data;
-  
-  ipcRenderer.send('xmpp-add-contact', { accountId: acct.id, jid: displayJid, name: displayName });
+  const { realJid, displayName, acct } = data;
+  if (!realJid) return;  // room hides real JIDs; the menu doesn't offer this then
+
+  ipcRenderer.send('xmpp-add-contact', { accountId: acct.id, jid: realJid, name: displayName });
   if (!acct.roster) acct.roster = {};
-  acct.roster[displayJid] = { jid: displayJid, name: displayName, presence: 'offline', groups: [] };
+  acct.roster[realJid] = { jid: realJid, name: displayName, presence: 'offline', groups: [] };
   saveRoster(acct.id, acct.roster);
   addSystemMsg(null, acct.id, `📋 Subscription request sent to ${displayName}`);
   renderLeftPanel();
@@ -1839,26 +1852,14 @@ function showMessageSenderContextMenu(chat, msg) {
   // Extract nick from msg.from (e.g., "username@server/nickname" -> "nickname" or "nickname" for direct msgs)
   const nick = msg.from.includes('/') ? msg.from.split('/')[1] : msg.from;
   
-  // Try to get participant data for real JID
-  const partData = chat.participants?.[nick];
-  const mucJid = (typeof partData === 'object') ? partData?.mucJid : null;
-  const rawJid = mucJid || (nick.toLowerCase() + '@' + chat.jid.split('@')[1]);
-  const displayJid = bareJid(rawJid);
+  const { realJid, dmJid: displayJid } = participantJids(chat, nick);
   const displayName = nick;
 
   // Store data globally for context menu callbacks
-  window._contextMenuData = { chat, nick, displayJid, displayName, acct };
+  window._contextMenuData = { chat, nick, displayJid, realJid, displayName, acct };
 
   const contextMenu = document.getElementById('context-menu');
-  contextMenu.innerHTML = `
-    <div style="padding: 6px 10px; font-size: 12px; color: var(--text3); border-bottom: 1px solid var(--border); margin-bottom: 4px;">${esc(displayName)}</div>
-    <div class="context-menu-item" data-action="openDirectMessageWithParticipant_Menu">
-      💬 Send DM
-    </div>
-    <div class="context-menu-item" data-action="addParticipantToContacts_Menu">
-      ➕ Add to Contacts
-    </div>
-  `;
+  contextMenu.innerHTML = participantMenuHtml(displayName, realJid);
   
   showContextMenu(window.currentContextEvent);
 }
@@ -1985,11 +1986,7 @@ function openDirectMessageWithParticipant(chat, nick) {
   const acct = state.accounts.find(a => a.id === chat.accountId);
   if (!acct) return;
 
-  // Try to use actual JID from MUC if available, otherwise construct from nick
-  const partData = chat.participants[nick];
-  const mucJid = (typeof partData === 'object') ? partData?.mucJid : null;
-  const roomServer = chat.jid.split('@')[1];
-  const participantJid = mucJid || (nick.toLowerCase() + '@' + roomServer);
+  const participantJid = participantJids(chat, nick).dmJid;
 
   // Create or find existing DM chat
   const key = chatKey(acct.id, participantJid);
@@ -3123,25 +3120,25 @@ async function loadEmoticons() {
 
 async function loadMessageHistory(key) {
   const chat = state.chats[key];
-  if (!chat || chat.type === 'room') return; // Only for DMs
+  // Only real DMs: rooms get history on join, room PMs (room/nick) and Directorbot aren't archived
+  if (!chat || chat.type === 'room' || chat.jid.includes('/') || chat.jid.startsWith('directorbot@')) return;
+  const account = state.accounts.find(a => a.id === chat.accountId);
+  if (!account || account.status !== 'online') return;
 
   try {
-    const account = state.accounts.find(a => a.id === chat.accountId);
-    if (!account) return;
+    const history = await ipcRenderer.invoke('load-message-history', { accountId: account.id, with: chat.jid, count: 100 });
+    if (!history?.length || state.chats[key] !== chat) return;
 
-    const messages = await ipcRenderer.invoke('load-message-history', {
-      accountId: account.id,
-      'with': chat.jid,
-      count: 500
-    });
+    // Same sender naming as live messages, so duplicates can be recognised
+    const added = history
+      .map(m => ({ from: m.me ? account.username : chat.name, text: m.text, ts: m.ts, me: m.me }))
+      .filter(m => !isDuplicateMessage(chat, m));
+    if (!added.length) return;
 
-    if (messages && messages.length > 0) {
-      // Merge with existing messages, avoiding duplicates
-      const existingTs = new Set(chat.messages.map(m => m.ts));
-      const newMessages = messages.filter(m => !existingTs.has(m.ts));
-      chat.messages.unshift(...newMessages);
-      console.log(`Loaded ${newMessages.length} historical messages for ${chat.jid}`);
-    }
+    chat.messages.push(...added);
+    chat.messages.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    saveChatMessages(key);
+    if (state.activeChatKey === key) openChat(key, false);
   } catch (err) {
     console.error('Failed to load message history:', err);
   }

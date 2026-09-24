@@ -762,89 +762,65 @@ ipcMain.handle('load-emoticons', async () => {
   }
 });
 
-ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 500 }) => {
+// Latest DM history from the server archive (XEP-0313 MAM), oldest first
+ipcMain.handle('load-message-history', async (e, { accountId, with: withJid, count = 100 }) => {
   const conn = connections[accountId];
-  if (!conn) return [];
+  if (!conn || !isValidJid(withJid)) return [];
 
   const xmpp = conn._xmpp;
+  const myBare = xmpp.jid ? xmpp.jid.bare().toString() : '';
+  const queryId = `mam-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const messages = [];
-  let resolved = false;
 
   return new Promise((resolve) => {
-    function cleanup() {
-      if (resolved) return;
-      resolved = true;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
       xmpp.removeListener('stanza', listener);
       clearTimeout(timeoutHandle);
-    }
+      resolve(messages);
+    };
 
-    function stanzaHandler(stanza) {
-      if (!stanza) return;
-      const name = stanza.name;
-
-      // Handle MAM result messages
-      if (name === 'message') {
+    function listener(stanza) {
+      if (stanza.is('message')) {
         const result = stanza.getChild('result', 'urn:xmpp:mam:2');
-        if (result) {
-          const forwarded = result.getChild('forwarded', 'urn:xmpp:forward:0');
-          if (forwarded) {
-            const msg = forwarded.getChild('message');
-            const delay = forwarded.getChild('delay', 'urn:xmpp:delay');
-
-            if (msg) {
-              const body = msg.getChildText('body');
-              const from = msg.attrs.from;
-              const ts = delay && delay.attrs.stamp ? new Date(delay.attrs.stamp).getTime() : Date.now();
-
-              messages.push({ from, text: body, ts, me: false });
-            }
-          }
-        }
-      }
-
-      // Handle IQ result (completion marker)
-      if (name === 'iq' && stanza.attrs.type === 'result') {
-        const fin = stanza.getChild('fin', 'urn:xmpp:mam:2');
-        if (fin && fin.attrs.complete === 'true') {
-          cleanup();
-          resolve(messages.reverse());
-        }
+        if (!result || result.attrs.queryid !== queryId) return;
+        const forwarded = result.getChild('forwarded', 'urn:xmpp:forward:0');
+        const msg = forwarded?.getChild('message');
+        const body = msg?.getChildText('body');
+        if (!body) return;
+        const delay = forwarded.getChild('delay', 'urn:xmpp:delay');
+        const from = msg.attrs.from || '';
+        messages.push({
+          text: body,
+          ts: delay?.attrs.stamp ? new Date(delay.attrs.stamp).getTime() : Date.now(),
+          me: from.split('/')[0] === myBare
+        });
+      } else if (stanza.is('iq') && stanza.attrs.id === queryId) {
+        finish();  // <fin/> result or error: either way the query is over
       }
     }
 
-    const listener = (stanza) => stanzaHandler(stanza);
     xmpp.on('stanza', listener);
+    const timeoutHandle = setTimeout(finish, 8000);
 
-    // Send MAM query
-    const queryId = `mam-${Date.now()}`;
-    const mamQuery = xml(
-      'iq',
-      { type: 'set', id: queryId },
-      xml('query', { xmlns: 'urn:xmpp:mam:2' },
+    // <before/> with no id asks for the last page, returned in chronological order
+    const mamQuery = xml('iq', { type: 'set', id: queryId },
+      xml('query', { xmlns: 'urn:xmpp:mam:2', queryid: queryId },
         xml('x', { xmlns: 'jabber:x:data', type: 'submit' },
-          xml('field', { var: 'FORM_TYPE', type: 'hidden' },
-            xml('value', {}, 'urn:xmpp:mam:2')
-          ),
-          xml('field', { var: 'with' },
-            xml('value', {}, withJid)
-          )
+          xml('field', { var: 'FORM_TYPE', type: 'hidden' }, xml('value', {}, 'urn:xmpp:mam:2')),
+          xml('field', { var: 'with' }, xml('value', {}, withJid))
         ),
         xml('set', { xmlns: 'http://jabber.org/protocol/rsm' },
-          xml('max', {}, count.toString()),
-          xml('order', {}, 'reverse')
+          xml('max', {}, String(Math.min(Number(count) || 100, 500))),
+          xml('before')
         )
       )
     );
-
-    const timeoutHandle = setTimeout(() => {
-      cleanup();
-      resolve(messages.reverse());
-    }, 5000);
-
     xmpp.send(mamQuery).catch(err => {
       console.error('MAM query error:', err);
-      cleanup();
-      resolve(messages.reverse());
+      finish();
     });
   });
 });
