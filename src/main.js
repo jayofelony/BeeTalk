@@ -3,7 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const Store = require('electron-store');
 const { client, xml } = require('@xmpp/client');
-const { isValidJid, isValidMessageType, isStreamError, checkMamSupport, tlsOnlyCredentials, compareVersions } = require('./lib/xmpp-helpers');
+const { isValidJid, isValidMessageType, checkMamSupport, tlsOnlyCredentials, compareVersions } = require('./lib/xmpp-helpers');
+const { watchConnection } = require('./lib/connection');
+const { unwrapCarbon, chatState, CARBONS, CHATSTATES, CHAT_STATES } = require('./lib/stanzas');
 // keytar is only used to migrate passwords saved by older versions; it is optional
 let keytar = null;
 try { keytar = require('keytar'); } catch {}
@@ -20,10 +22,6 @@ let tray;
 let unreadCount = 0;
 
 const connections    = {};  // accountId -> { _xmpp, account }
-
-// @xmpp/client reconnects by itself after each disconnect; we only tune its delay
-const RECONNECT_MIN_MS = 2000;
-const RECONNECT_MAX_MS = 5 * 60 * 1000;
 
 // Ensure OS-level app identity uses BeeTalk instead of the Electron default name.
 app.setName('BeeTalk');
@@ -194,6 +192,7 @@ function isDebugMode() {
 async function destroyConnection(id) {
   if (!connections[id]) return;
   const old = connections[id]._xmpp;
+  connections[id].watcher?.stop();
   delete connections[id];
   try { old.reconnect.stop(); } catch {}
   try { old.removeAllListeners(); } catch {}
@@ -249,47 +248,75 @@ async function connectXmpp(account) {
   });
 
   connections[id] = { _xmpp: xmpp, account };
-  xmpp.reconnect.delay = RECONNECT_MIN_MS;
+  const isCurrent = () => connections[id]?._xmpp === xmpp;
   send('xmpp-status', { id, status: 'connecting' });
 
-  // Report a lost connection once, not on every failed retry
-  let downReported = false;
-
-  xmpp.on('disconnect', () => {
-    if (connections[id]?._xmpp !== xmpp) return;
-    if (!downReported) send('xmpp-status', { id, status: 'offline' });
-    downReported = true;
-    // Back off for the next attempt; the library has already scheduled this one
-    xmpp.reconnect.delay = Math.min(xmpp.reconnect.delay * 2, RECONNECT_MAX_MS);
+  // Reconnect/backoff, resumed sessions and keepalive: see src/lib/connection.js
+  const watcher = watchConnection(xmpp, {
+    isCurrent,
+    onOnline: ({ resumed }) => {
+      send('xmpp-status', { id, status: 'online', jid: xmpp.jid.toString(), resumed });
+      // A resumed session (XEP-0198) keeps presence, roster, rooms and carbons on the server
+      if (resumed) return;
+      connections[id].mamSupported = checkMamSupport(xmpp);
+      xmpp.send(xml('presence')).catch(() => {});
+      xmpp.send(xml('iq', { type: 'get', id: 'roster1' }, xml('query', { xmlns: 'jabber:iq:roster' }))).catch(() => {});
+      // Message carbons (XEP-0280): also receive DMs sent/received by our other devices
+      xmpp.iqCaller.request(xml('iq', { type: 'set' }, xml('enable', { xmlns: CARBONS })), 10000).catch(() => {});
+    },
+    onOffline: () => send('xmpp-status', { id, status: 'offline' }),
+    onError: error => send('xmpp-status', { id, status: 'error', error }),
+    onAuthFail: error => {
+      send('xmpp-status', { id, status: 'authfail', error });
+      destroyConnection(id);
+    }
   });
-
-  xmpp.on('online', (address) => {
-    downReported = false;
-    xmpp.reconnect.delay = RECONNECT_MIN_MS;
-    send('xmpp-status', { id, status: 'online', jid: address.toString() });
-    if (connections[id]?._xmpp === xmpp) connections[id].mamSupported = checkMamSupport(xmpp);
-    xmpp.send(xml('presence')).catch(() => {});
-    xmpp.send(
-      xml('iq', { type: 'get', id: 'roster1' },
-        xml('query', { xmlns: 'jabber:iq:roster' })
-      )
-    ).catch(() => {});
-  });
+  connections[id].watcher = watcher;
 
   xmpp.on('stanza', stanza => handleStanza(id, stanza));
+  xmpp.start().catch(watcher.handleError);
+}
 
-  const onError = err => {
-    if (isStreamError(err) || connections[id]?._xmpp !== xmpp) return;
-    const msg = err.message || String(err);
-    const isAuth = err.name === 'SASLError' || /not-authorized|credentials/i.test(msg);
-    if (!isAuth && downReported) return;  // still retrying; already reported
-    downReported = true;
-    send('xmpp-status', { id, status: isAuth ? 'authfail' : 'error', error: msg });
-    // Retrying a wrong password would only risk locking the account
-    if (isAuth) destroyConnection(id);
-  };
-  xmpp.on('error', onError);
-  xmpp.start().catch(onError);
+// outgoing: a message we sent from another device (a "sent" carbon); `from` is then the peer
+function handleMessage(accountId, stanza, outgoing) {
+  const body = stanza.getChildText('body');
+  const subject = stanza.getChildText('subject');
+  const type = stanza.attrs.type || 'chat';
+  const from = outgoing ? stanza.attrs.to : stanza.attrs.from;
+  if (!from) return;
+  const senderName = from.split('@')[0];
+
+  // Handle room subject (MOTD) - can come with or without body
+  if (type === 'groupchat' && subject) {
+    const roomJid = from.split('/')[0];
+    send('xmpp-room-subject', { accountId, roomJid, subject });
+    if (!body) return;
+  }
+
+  // Typing notifications (XEP-0085), DMs only
+  const state = type !== 'groupchat' && !outgoing ? chatState(stanza) : null;
+  if (state) send('xmpp-chat-state', { accountId, from, state });
+
+  if (!body) return;
+
+  // Get timestamp from delay element if present (history / offline messages), otherwise use now
+  let ts = Date.now();
+  const delayEl = stanza.getChild('delay', 'urn:xmpp:delay');
+  const delayed = !!(delayEl && delayEl.attrs.stamp);
+  // For directorbot, don't include timestamps
+  if (senderName === 'directorbot') {
+    ts = 0;
+  } else if (delayed) {
+    ts = new Date(delayEl.attrs.stamp).getTime();
+  }
+
+  send('xmpp-message', { accountId, from, body, type, ts, delayed, outgoing });
+
+  // Notifications are decided by the renderer (it knows DND, settings and the user's nick)
+  if (!delayed && !outgoing && !mainWindow.isFocused()) {
+    unreadCount++;
+    tray && tray.setToolTip(`BeeTalk (${unreadCount} unread)`);
+  }
 }
 
 function handleStanza(accountId, stanza) {
@@ -297,6 +324,10 @@ function handleStanza(accountId, stanza) {
 
   if (name === 'iq') {
     const query = stanza.getChild('query', 'jabber:iq:roster');
+    // Roster data is only valid from our own server/account (RFC 6120 §8.1.2.1), not other users
+    const xmpp = connections[accountId]?._xmpp;
+    const from = stanza.attrs.from;
+    if (query && from && from !== xmpp?.jid?.bare().toString() && from !== xmpp?.jid?.domain) return;
     if (query) {
       const contacts = query.getChildren('item').map(item => ({
         jid:          item.attrs.jid,
@@ -310,42 +341,17 @@ function handleStanza(accountId, stanza) {
   }
 
   if (name === 'message') {
-    const body = stanza.getChildText('body');
-    const subject = stanza.getChildText('subject');
-    const from = stanza.attrs.from;
-    const type = stanza.attrs.type || 'chat';
-    const senderName = from.split('@')[0];
-
-    // Handle room subject (MOTD) - can come with or without body
-    if (type === 'groupchat' && subject) {
-      const roomJid = from.split('/')[0];
-      console.log(`[XMPP] Room subject received: ${roomJid} = "${subject}"`);
-      send('xmpp-room-subject', { accountId, roomJid, subject });
-      // Continue to process body if present
-      if (!body) return;
+    const xmpp = connections[accountId]?._xmpp;
+    const myBare = xmpp?.jid ? xmpp.jid.bare().toString() : '';
+    const carbon = unwrapCarbon(stanza, myBare);
+    if (carbon === null) return;  // forged or empty carbon
+    if (carbon) {
+      // A copy from one of our other devices: DMs only (carbons never cover rooms)
+      const type = carbon.message.attrs.type || 'normal';
+      if (type === 'chat' || type === 'normal') handleMessage(accountId, carbon.message, carbon.direction === 'sent');
+      return;
     }
-
-    // Skip messages without body (unless they're room subjects, which we handled above)
-    if (!body) return;
-
-    // Get timestamp from delay element if present (history / offline messages), otherwise use now
-    let ts = Date.now();
-    const delayEl = stanza.getChild('delay', 'urn:xmpp:delay');
-    const delayed = !!(delayEl && delayEl.attrs.stamp);
-    // For directorbot, don't include timestamps
-    if (senderName === 'directorbot') {
-      ts = 0;
-    } else if (delayed) {
-      ts = new Date(delayEl.attrs.stamp).getTime();
-    }
-
-    send('xmpp-message', { accountId, from, body, type, ts, delayed });
-
-    // Notifications are decided by the renderer (it knows DND, settings and the user's nick)
-    if (!delayed && !mainWindow.isFocused()) {
-      unreadCount++;
-      tray && tray.setToolTip(`BeeTalk (${unreadCount} unread)`);
-    }
+    handleMessage(accountId, stanza, false);
     return;
   }
 
@@ -412,7 +418,15 @@ ipcMain.on('xmpp-send-message', (e, { accountId, to, body, type }) => {
     return;
   }
 
-  c._xmpp.send(xml('message', { to, type: msgType }, xml('body', {}, body))).catch(() => {});
+  // Chat messages carry <active/> (XEP-0085): lets the other side know we support typing notifications
+  const extra = msgType === 'chat' ? [xml('active', { xmlns: CHATSTATES })] : [];
+  c._xmpp.send(xml('message', { to, type: msgType }, xml('body', {}, body), ...extra)).catch(() => {});
+});
+
+ipcMain.on('xmpp-send-chat-state', (e, { accountId, to, state }) => {
+  const c = connections[accountId];
+  if (!c || !isValidJid(to) || !CHAT_STATES.includes(state)) return;
+  c._xmpp.send(xml('message', { to, type: 'chat' }, xml(state, { xmlns: CHATSTATES }))).catch(() => {});
 });
 
 ipcMain.on('xmpp-send-presence', (e, { accountId, show, status }) => {

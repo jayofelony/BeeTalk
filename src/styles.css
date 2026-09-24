@@ -658,6 +658,9 @@ img[src$=".gif"] {
   image-rendering: auto;
 }
 
+/* "… is typing" in the chat header */
+#chat-header-sub.typing { color: var(--accent); font-style: italic; }
+
 /* Add contact field (left panel) */
 #new-contact-username {
   width: 100%;

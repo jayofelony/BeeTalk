@@ -30,10 +30,9 @@ ipcMain.handle('get-version', () => 'test');
 ipcMain.handle('load-message-history', (e, q) => fake.history(q));
 ipcMain.handle('discover-rooms', () => fake.rooms);
 ipcMain.handle('check-update', () => ({ status: 'up-to-date', version: 'test' }));
-for (const ch of ['xmpp-connect', 'xmpp-disconnect', 'xmpp-send-message', 'xmpp-send-presence', 'xmpp-join-room',
-  'xmpp-leave-room', 'xmpp-add-contact', 'xmpp-remove-contact', 'xmpp-update-contact-groups', 'save-accounts',
-  'show-notification', 'open-link', 'set-launch-on-startup', 'window-minimize', 'window-maximize', 'window-close',
-  'window-focus']) {
+// Record every channel preload.js lets the renderer send (kept in sync automatically)
+const preloadSrc = fs.readFileSync(path.join(ROOT, 'src', 'preload.js'), 'utf8');
+for (const [, ch] of preloadSrc.matchAll(/ipcRenderer\.send\('([a-z-]+)'/g)) {
   ipcMain.on(ch, (e, data) => fake.sent.push({ channel: ch, data }));
 }
 

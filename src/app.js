@@ -253,12 +253,18 @@ window.openExternalLink = openExternalLink;
 // ─────────────────────────────────────────────
 //  IPC events from main process
 // ─────────────────────────────────────────────
-ipcRenderer.on('xmpp-status', (e, { id, status, jid, error }) => {
+ipcRenderer.on('xmpp-status', (e, { id, status, jid, error, resumed }) => {
   const acct = state.accounts.find(a => a.id === id);
   if (!acct) return;
+  const wasDown = acct._wentDown;
   acct.status = status;
   if (jid) acct.jid = jid;
-  if (status === 'online') {
+  if (status === 'online' && wasDown) {
+    addSystemMsg(null, id, resumed ? '✓ Reconnected (nothing missed)' : '✓ Reconnected');
+  }
+  if (status === 'online') acct._wentDown = false;
+  // A resumed session (XEP-0198) is still in its rooms; only a new session rejoins
+  if (status === 'online' && !resumed) {
     // Re-join saved rooms now that we're connected
     const savedRooms = getSavedRooms(id);
     const roomAssignments = getSavedRoomAssignments(id);
@@ -284,6 +290,7 @@ ipcRenderer.on('xmpp-status', (e, { id, status, jid, error }) => {
   }
   if (status === 'offline' && acct._wasOnline) {
     addSystemMsg(null, id, '⚠ Disconnected — reconnecting…');
+    acct._wentDown = true;
   }
   acct._wasOnline = (status === 'online');
   renderAccountBar();
@@ -383,7 +390,7 @@ ipcRenderer.on('app-blur', () => {
   state.appIsFocused = false;
 });
 
-ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed }) => {
+ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed, outgoing }) => {
   const senderBareJid = bareJid(from);
   const senderName = senderBareJid.split('@')[0];
 
@@ -429,9 +436,14 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed })
     const acct = state.accounts.find(a => a.id === accountId);
     const displayName = isRoomPM ? (from.split('/')[1] || '?') : (acct?.roster?.[senderBareJid]?.name || senderName);
     ensureChat(key, { type: 'dm', name: displayName, jid: dmJid, accountId });
-    const msg = { from: displayName, text: body, ts, me: false };
+    // outgoing: a message we sent from another device (message carbons); `from` is the peer
+    const msg = outgoing
+      ? { from: acct?.username || 'me', text: body, ts, me: true }
+      : { from: displayName, text: body, ts, me: false };
     if (delayed && isDuplicateMessage(state.chats[key], msg)) return;
+    if (!outgoing) setPeerTyping(key, false);  // a message ends "typing…"
     pushMessage(key, msg);
+    if (outgoing) { saveActiveDMs(accountId); return; }
     if (!delayed) notifyIfNeeded(key, displayName, body);
 
     // Play sound for DM notifications if enabled and not in Do Not Disturb mode
@@ -444,6 +456,70 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed })
     saveActiveDMs(accountId);
   }
 });
+
+// ─────────────────────────────────────────────
+//  Typing notifications (XEP-0085), DMs only
+// ─────────────────────────────────────────────
+// Incoming: show "typing…" in the chat header. Outgoing: only to peers whose client
+// has sent us a chat state, as XEP-0085 asks; "paused" after 5 s without typing.
+const TYPING_PAUSE_MS = 5000;
+const TYPING_EXPIRE_MS = 30000;  // in case the peer never sends "paused"
+
+function dmKeyFor(accountId, from) {
+  const isRoomPM = state.chats[chatKey(accountId, bareJid(from))]?.type === 'room';
+  return chatKey(accountId, isRoomPM ? from : bareJid(from));
+}
+
+function setPeerTyping(key, typing) {
+  const chat = state.chats[key];
+  if (!chat) return;
+  clearTimeout(chat.typingTimer);
+  chat.peerTyping = typing;
+  if (typing) chat.typingTimer = setTimeout(() => setPeerTyping(key, false), TYPING_EXPIRE_MS);
+  if (state.activeChatKey === key) updateChatHeaderSub(chat);
+}
+
+function updateChatHeaderSub(chat) {
+  const typing = chat.type !== 'room' && chat.peerTyping;
+  chatHeaderSub.textContent = chat.type === 'room' ? '' : (typing ? `${chat.name} is typing…` : chat.jid);
+  chatHeaderSub.classList.toggle('typing', !!typing);
+}
+
+ipcRenderer.on('xmpp-chat-state', (e, { accountId, from, state: chatStateName }) => {
+  const key = dmKeyFor(accountId, from);
+  const chat = state.chats[key];
+  if (!chat || chat.type === 'room') return;  // don't create chats for typing alone
+  chat.peerSendsChatStates = true;
+  setPeerTyping(key, chatStateName === 'composing');
+});
+
+function sendChatState(chat, chatStateName) {
+  ipcRenderer.send('xmpp-send-chat-state', { accountId: chat.accountId, to: chat.jid, state: chatStateName });
+}
+
+// Called on every keystroke in the message box
+function onComposeInput() {
+  const chat = state.chats[state.activeChatKey];
+  const acct = chat && state.accounts.find(a => a.id === chat.accountId);
+  if (!chat || chat.type === 'room' || !chat.peerSendsChatStates || acct?.status !== 'online') return;
+  clearTimeout(chat.composePauseTimer);
+  if (!msgInput.value.trim()) {
+    if (chat.composingSent) { chat.composingSent = false; sendChatState(chat, 'active'); }
+    return;
+  }
+  if (!chat.composingSent) { chat.composingSent = true; sendChatState(chat, 'composing'); }
+  chat.composePauseTimer = setTimeout(() => {
+    if (chat.composingSent) { chat.composingSent = false; sendChatState(chat, 'paused'); }
+  }, TYPING_PAUSE_MS);
+}
+
+// Leaving a chat or sending ends our "composing" state
+function endCompose(chat, sendPaused) {
+  if (!chat) return;
+  clearTimeout(chat.composePauseTimer);
+  if (chat.composingSent && sendPaused) sendChatState(chat, 'paused');
+  chat.composingSent = false;
+}
 
 ipcRenderer.on('xmpp-presence', (e, { accountId, from, type, show, mucJid }) => {
   const acct = state.accounts.find(a => a.id === accountId);
@@ -1104,6 +1180,7 @@ let openChatRenderId = 0;  // a newer openChat() render supersedes older batches
 // scrollTo: 'bottom', or 'keep' to hold the view in place after older messages were prepended
 function openChat(key, loadHistory = true, scrollTo = 'bottom') {
   const renderId = ++openChatRenderId;
+  if (state.activeChatKey && state.activeChatKey !== key) endCompose(state.chats[state.activeChatKey], true);
   state.activeChatKey = key;
   const chat = state.chats[key];
   if (!chat) return;
@@ -1115,7 +1192,7 @@ function openChat(key, loadHistory = true, scrollTo = 'bottom') {
   chatHeaderAv.style.borderRadius = isRoom ? '6px' : '10px';
   chatHeaderAv.textContent   = isRoom ? '#' : initials(chat.name);
   chatHeaderName.textContent = isRoom ? chat.jid : chat.name;
-  chatHeaderSub.textContent  = isRoom ? '' : chat.jid;
+  updateChatHeaderSub(chat);
 
   const pp = document.getElementById('participants-panel');
   if (pp) { isRoom ? pp.classList.add('open') : pp.classList.remove('open'); }
@@ -1374,6 +1451,7 @@ function sendMessage() {
   if (!acct || acct.status !== 'online') return;
 
   ipcRenderer.send('xmpp-send-message', { accountId: acct.id, to: chat.jid, body: text, type: chat.type === 'room' ? 'groupchat' : 'chat' });
+  endCompose(chat, false);
 
   // Echo immediately for DMs (groupchat echo comes back from server)
   if (chat.type === 'dm') {
@@ -3571,7 +3649,7 @@ $('btn-chat-info').addEventListener('click', showChatInfoModal);
 $('btn-chat-search').addEventListener('click', showChatSearchModal);
 
 msgInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
-msgInput.addEventListener('input', () => { msgInput.style.height = 'auto'; msgInput.style.height = Math.min(msgInput.scrollHeight, 130) + 'px'; });
+msgInput.addEventListener('input', () => { msgInput.style.height = 'auto'; msgInput.style.height = Math.min(msgInput.scrollHeight, 130) + 'px'; onComposeInput(); });
 
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {

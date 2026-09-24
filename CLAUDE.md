@@ -87,9 +87,15 @@ Changes flow: main process → renderer via IPC events → state mutations → D
 
 ### Connection & Reconnect
 
-- @xmpp/client reconnects by itself after every disconnect. `connectXmpp()` only tunes `xmpp.reconnect.delay` (2s, doubling to 5 min, reset when online) and reports a drop to the UI once.
-- After an authentication failure the connection is destroyed; retrying a wrong password could lock the account.
-- The password is only sent after STARTTLS succeeded (`credentials` callback + `isEncrypted()`); goonfleet.com offers only SASL PLAIN.
+The server is Openfire 5.0.2 (goonfleet.com): stream management (XEP-0198, resumable for 600 s), message carbons, ping, blocking, vCard/PEP, offline messages; no message archive (accounts or rooms), no file upload.
+
+- `src/lib/connection.js` (`watchConnection`) owns the lifecycle; `connectXmpp()` in main.js only wires callbacks. @xmpp/client reconnects by itself; the watcher backs off its delay (2 s doubling to 5 min), reports a drop once, and stops after an authentication failure (a wrong password retried endlessly could lock the account).
+- **Resumed sessions:** after a short drop the library resumes the XEP-0198 session and marks itself online *without emitting 'online'*. The watcher detects the server's `<resumed/>` and reports `online` with `resumed: true`. A resumed session keeps presence, roster, room membership and carbons, so the renderer does not rejoin rooms.
+- **Keepalive:** a ping every 60 s; no answer within 15 s means a dead connection (e.g. after sleep), so the socket is destroyed and the library reconnects/resumes.
+- The password is only sent after STARTTLS (`tlsOnlyCredentials` in `src/lib/xmpp-helpers.js`); goonfleet.com offers only SASL PLAIN.
+- **Carbons** (XEP-0280) are enabled on each new session; `unwrapCarbon` (`src/lib/stanzas.js`) only trusts carbons from our own bare JID. "Sent" carbons reach the renderer as `xmpp-message` with `outgoing: true`.
+- **Typing** (XEP-0085, DMs only): incoming states arrive as `xmpp-chat-state`; outgoing states are only sent to peers that have sent us one, and chat messages carry `<active/>`.
+- Roster pushes are only accepted from our own account/server.
 
 ### Messages, History & Notifications
 
