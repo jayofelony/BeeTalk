@@ -435,12 +435,9 @@ ipcRenderer.on('xmpp-message', (e, { accountId, from, body, type, ts, delayed })
 
     // Play sound for DM notifications if enabled and not in Do Not Disturb mode
     const settings = getAppSettings();
-    if (settings.dmSoundEnabled !== false && acct?.presence !== 'dnd') {
+    if (!delayed && settings.dmSoundEnabled !== false && acct?.presence !== 'dnd') {
       playNotificationSound({ beepCount: 2, baseFrequency: 600, frequencyIncrement: 0, beepDuration: 0.15, gapDuration: 0.08, volume: 0.25 });
     }
-
-    // Refresh the contact list to show the new DM
-    renderLeftPanel();
 
     // Persist active DM metadata for unknown contacts
     saveActiveDMs(accountId);
@@ -464,10 +461,10 @@ ipcRenderer.on('xmpp-presence', (e, { accountId, from, type, show, mucJid }) => 
       chat.participants = chat.participants || {};
       if (type === 'unavailable') delete chat.participants[nick];
       else chat.participants[nick] = { presence: show || 'available', mucJid: mucJid };
-      if (state.activeChatKey === key) renderParticipants(chat);
+      if (state.activeChatKey === key) scheduleParticipants();
     }
   }
-  if (state.activeAccountId === accountId) renderLeftPanel();
+  if (state.activeAccountId === accountId) scheduleLeftPanel();
 });
 
 ipcRenderer.on('tray-status', (e, show) => {
@@ -559,9 +556,9 @@ function pushMessage(key, msg) {
     scrollToBottom();
   }
 
-  renderLeftPanel();
+  scheduleLeftPanel();
   saveChatState(key);  // Persist chat state
-  saveChatMessages(key);  // Persist messages to localStorage
+  scheduleSaveChatMessages(key);  // Persist messages to localStorage
 }
 
 function addSystemMsg(key, accountId, text) {
@@ -650,6 +647,23 @@ function saveRoster(accountId, roster) {
 // ─────────────────────────────────────────────
 //  Render
 // ─────────────────────────────────────────────
+// Busy rooms deliver bursts of messages and presence changes; coalesce the
+// resulting re-renders into one per frame.
+let leftPanelFrame = null;
+function scheduleLeftPanel() {
+  if (leftPanelFrame) return;
+  leftPanelFrame = requestAnimationFrame(() => { leftPanelFrame = null; renderLeftPanel(); });
+}
+let participantsFrame = null;
+function scheduleParticipants() {
+  if (participantsFrame) return;
+  participantsFrame = requestAnimationFrame(() => {
+    participantsFrame = null;
+    const chat = state.chats[state.activeChatKey];
+    if (chat?.type === 'room') renderParticipants(chat);
+  });
+}
+
 function renderAccountBar() {
   accountListEl.innerHTML = '';
   // Single-account mode: only offer add-account buttons when no account exists
@@ -2669,18 +2683,34 @@ function markChatAsRead(key) {
   saveChatState(key);
 }
 
+// localStorage is shared by all chats (~5-10 MB), so rooms keep less than DMs
+const SAVED_MESSAGES_ROOM = 200;
+const SAVED_MESSAGES_DM = 500;
+
 function saveChatMessages(key) {
   const chat = state.chats[key];
   if (!chat || !chat.messages) return;
 
   try {
-    // Only save last 500 messages to avoid localStorage limits
-    const messagesToSave = chat.messages.slice(-500);
+    const limit = chat.type === 'room' ? SAVED_MESSAGES_ROOM : SAVED_MESSAGES_DM;
+    const messagesToSave = chat.messages.filter(m => !m.system).slice(-limit);
     localStorage.setItem('chat_messages_' + key, JSON.stringify(messagesToSave));
   } catch (err) {
     console.error('Failed to save messages:', err);
   }
 }
+
+// Writing a whole chat on every incoming message is expensive; save at most every few seconds
+const pendingSaves = new Map();  // chat key -> timer
+function scheduleSaveChatMessages(key) {
+  if (pendingSaves.has(key)) return;
+  pendingSaves.set(key, setTimeout(() => { pendingSaves.delete(key); saveChatMessages(key); }, 3000));
+}
+function flushPendingSaves() {
+  pendingSaves.forEach((timer, key) => { clearTimeout(timer); saveChatMessages(key); });
+  pendingSaves.clear();
+}
+window.addEventListener('beforeunload', flushPendingSaves);
 
 function loadChatMessages(key) {
   try {
@@ -2878,15 +2908,21 @@ function sanitizeMessageHTML(html) {
 // ─────────────────────────────────────────────
 //  Emoticons
 // ─────────────────────────────────────────────
-function parseEmoticons(text) {
-  let result = text;
-  if (!emoticonsList.length) return result;
+// One regex for all emoticon names (built when emoticons load), longest names first
+let emoticonRegex = null;
+const emoticonIndexByName = new Map();
+function buildEmoticonRegex() {
+  emoticonIndexByName.clear();
+  emoticonsList.forEach((e, idx) => { if (!emoticonIndexByName.has(e.name)) emoticonIndexByName.set(e.name, idx); });
+  const names = [...emoticonIndexByName.keys()].sort((a, b) => b.length - a.length);
+  emoticonRegex = names.length
+    ? new RegExp(names.map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'g')
+    : null;
+}
 
-  emoticonsList.forEach(e => {
-    const regex = new RegExp(e.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g');
-    result = result.replace(regex, `__EMOTICON_${emoticonsList.indexOf(e)}__`);
-  });
-  return result;
+function parseEmoticons(text) {
+  if (!emoticonRegex) return text;
+  return text.replace(emoticonRegex, m => `__EMOTICON_${emoticonIndexByName.get(m)}__`);
 }
 
 function applyEmoticons(element) {
@@ -3112,6 +3148,7 @@ async function loadEmoticons() {
     Object.values(emoticons).forEach(folder => {
       emoticonsList.push(...folder);
     });
+    buildEmoticonRegex();
     console.log(`Loaded ${emoticonsList.length} emoticons from ${Object.keys(emoticons).length} folders`);
   } catch (err) {
     console.error('Failed to load emoticons:', err);
