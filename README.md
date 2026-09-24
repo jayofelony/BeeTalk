@@ -39,7 +39,7 @@ The installer will be in the `dist/` folder.
 
 Default connection is to **GSF Jabber** (goonfleet.com). When adding an account, enter your EVE character name, username, and password.
 
-To connect to a different XMPP server, modify the hardcoded server details in `src/app.js` (around line 732).
+The server is fixed to goonfleet.com (`GSF_SERVER` in `src/main.js`).
 
 | Server    | WebSocket URL (if needed)                        |
 |-----------|--------------------------------------------------|
@@ -108,7 +108,7 @@ BeeTalk/
 │   ├── main.js         # Electron main process (window, tray, XMPP, IPC)
 │   ├── preload.js      # Context isolation bridge
 │   ├── index.html      # UI shell
-│   ├── app.js          # Renderer — UI, XMPP events, multi-account, rooms
+│   ├── js/             # Renderer — UI, XMPP events, rooms, history (see CLAUDE.md)
 │   └── styles.css      # Light/dark theme
 ├── assets/
 │   ├── icon.png        # Source artwork for all icons (npm run icons)

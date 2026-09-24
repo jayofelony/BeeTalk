@@ -47,25 +47,35 @@ npm run icons     # Generate all icons (ico, icns, Linux PNG, tray) from assets/
 
 2. **Preload Script** (`src/preload.js`)
    - Context isolation bridge exposing `window.electronAPI`
-   - The renderer's `ipcRenderer` shim in `src/app.js` maps channel names to camelCase: `send('xmpp-connect')` → `electronAPI.xmppConnect()`, `on('app-focus')` → `electronAPI.onAppFocus()`
+   - The renderer's `ipcRenderer` shim in `src/js/core.js` maps channel names to camelCase: `send('xmpp-connect')` → `electronAPI.xmppConnect()`, `on('app-focus')` → `electronAPI.onAppFocus()`
    - **Every channel the renderer uses must be exposed here.** A missing one only logs a console warning ("IPC channel not exposed in preload")
 
-3. **Renderer Process** (`src/app.js` + `src/index.html` + `src/styles.css`)
-   - UI, chat state, XMPP event handling, message rendering, modals
+3. **Renderer Process** (`src/index.html` + `src/js/*.js` + `src/styles.css`)
+   - Plain scripts loaded in order by `index.html`; they share one global scope (no modules/bundler), so functions and top-level `const`s are visible across files. Add new code to the file that fits:
+     - `core.js`: IPC shim, config, `state`, DOM refs, escaping/links, modals, the `data-action` dispatcher (`UI_ACTIONS`), idle detection
+     - `events.js`: handlers for main-process events, typing notifications, sounds
+     - `chats.js`: chat/room state, duplicates, join history, DM archive loading
+     - `render.js`: left panel, `openChat`/`appendMessage`, sending
+     - `dialogs.js`: account dialogs, context menus, groups, join room, settings, chat info, update check
+     - `storage.js`: persistence, message history (IndexedDB), app settings
+     - `content.js`: sanitizing, emoticons and the picker
+     - `rooms.js`: Browse Rooms
+     - `init.js`: DOM event listeners and boot (must stay last)
+   - Top-level code runs at load in file order, so code that *runs* during load may only use things from earlier files; function calls at event time are fine
 
 ### Security Rules (renderer)
 
 Chat content (messages, room subjects, nicknames, room names) is untrusted. The page's CSP is `script-src 'self'`, so inline script and inline event handlers are blocked.
 
-- **Never use inline handlers** (`onclick="..."`). For clickable elements in generated HTML use `data-action="functionName"` plus `data-args="${esc(JSON.stringify([...]))}"`. One click listener dispatches these, and only to names in the `UI_ACTIONS` allow-list at the top of `src/app.js`; add new actions there. `data-close="modal"` also closes the modal afterwards.
+- **Never use inline handlers** (`onclick="..."`). For clickable elements in generated HTML use `data-action="functionName"` plus `data-args="${esc(JSON.stringify([...]))}"`. One click listener dispatches these, and only to names in the `UI_ACTIONS` allow-list in `src/js/core.js`; add new actions there. `data-close="modal"` also closes the modal afterwards.
 - **Escape all interpolated values** with `esc()` when building HTML strings.
 - **Message HTML** goes through `sanitizeMessageHTML()`, which parses with `DOMParser` (inert) and keeps only allow-listed tags. Links (`linkifyUrls`, `escapeAndLinkify`) and emoticons (`applyEmoticons`) are built as DOM nodes; never pass message text through `innerHTML`.
 - The main process doesn't trust renderer data: `xmpp-connect` connects using the stored account with the server pinned to `goonfleet.com`, and `open-link` only opens http(s) URLs.
 
 ### State Management
 
-The renderer maintains a single `state` object in `src/app.js`:
-- `accounts[]` — the account (single-account mode; kept as an array), with presence and display name
+The renderer maintains a single `state` object (`src/js/core.js`):
+- `accounts[]` — the account, with presence and display name. BeeTalk supports one account, but the data model is kept per account: account IDs are part of every storage key (`rooms_<id>`, history chat keys `<id>::<jid>`, the saved password), so changing it would need a data migration
 - `chats{}` — rooms and DMs keyed by `accountId::jid`. Room private messages use the full `room@conference/nick` JID
 - `activeAccountId`, `activeChatKey` — current selection in UI
 - `appIsFocused`, idle state for auto-away
@@ -108,7 +118,7 @@ The server is Openfire 5.0.2 (goonfleet.com): stream management (XEP-0198, resum
 
 - **Account**: `electron-store` (`accounts`), without password
 - **Password**: encrypted with `safeStorage` and stored as base64 in `electron-store` under `passwords[accountId]`
-- **Message history**: IndexedDB `beetalk-history` (store `messages`, index `chat_ts` on `[chat key, ts]`), see "Message history" in `src/app.js`. goonfleet.com has no server archive for accounts or rooms, so this is the only history. Messages are written as they arrive (one transaction per burst, no timers: hidden windows throttle them). Startup preloads the newest 300 per chat; "Load older messages" pages in more; in-chat search (Ctrl+Shift+F) covers everything stored. Rooms are pruned to 5000 messages, DMs and Directorbot are kept. Old `chat_messages_*` localStorage history is migrated once
+- **Message history**: IndexedDB `beetalk-history` (store `messages`, index `chat_ts` on `[chat key, ts]`), see `src/js/storage.js`. goonfleet.com has no server archive for accounts or rooms, so this is the only history. Messages are written as they arrive (one transaction per burst, no timers: hidden windows throttle them). Startup preloads the newest 300 per chat; "Load older messages" pages in more; in-chat search (Ctrl+Shift+F) covers everything stored. Rooms are pruned to 5000 messages, DMs and Directorbot are kept. Old `chat_messages_*` localStorage history is migrated once
 - **Rooms, roster, groups, chat state, settings**: renderer `localStorage` (`rooms_*`, `roster_*`, `chat_*`, `appSettings`)
 - **Server**: `goonfleet.com` (`GSF_SERVER` in `src/main.js`)
 
@@ -122,7 +132,7 @@ The server is Openfire 5.0.2 (goonfleet.com): stream management (XEP-0198, resum
 ## Common Patterns
 
 ### DOM Updates
-Use `$()` shorthand to get DOM elements by ID (defined at top of `src/app.js`). Most UI updates call `render*()` functions that rebuild a section of the DOM, e.g. `renderLeftPanel()` rebuilds the contact and room lists.
+Use `$()` shorthand to get DOM elements by ID (defined in `src/js/core.js`). Most UI updates call `render*()` functions that rebuild a section of the DOM, e.g. `renderLeftPanel()` rebuilds the contact and room lists.
 
 ### Error Handling
 Connection errors are shown in the connection status bar at the top of the chat area. XMPP stanza errors are logged to console. If an operation fails (e.g., room discovery), the UI shows an error message but doesn't crash.
@@ -146,7 +156,7 @@ npm run test:electron -- history  # one suite
 ```
 
 - **Main-process tests** (`test/node/`): helpers in `src/lib/xmpp-helpers.js` (JID validation, version comparison, archive check) and TLS enforcement against fake XMPP servers on localhost (needs `openssl`). Keep main-process logic that can be tested without Electron in `src/lib/`.
-- **Renderer tests** (`test/electron/*.test.js`): `run.js` loads the real `index.html`/`app.js`/`preload.js` with the main process replaced by fakes (`t.fake`: accounts, emoticons, rooms, history; every `ipcRenderer.send` is recorded in `t.fake.sent`). Each suite gets fresh in-memory storage. Suites drive the app through the same IPC events the main process sends (`page.send('xmpp-message', ...)`). The boot sequence sets `document.body.dataset.ready` when done.
+- **Renderer tests** (`test/electron/*.test.js`): `run.js` loads the real `index.html`/`src/js/*.js`/`preload.js` with the main process replaced by fakes (`t.fake`: accounts, emoticons, rooms, history; every `ipcRenderer.send` is recorded in `t.fake.sent`). Each suite gets fresh in-memory storage. Suites drive the app through the same IPC events the main process sends (`page.send('xmpp-message', ...)`). The boot sequence sets `document.body.dataset.ready` when done.
 - Suites cover: security (script injection, CSP, inert sanitizing), accounts, rooms, messaging/notifications, history, emoticons.
 - Hidden windows pause `requestAnimationFrame`, so tests shouldn't depend on more than a few batches of `openChat` rendering.
 - CI runs the tests on every push to `main` and on pull requests (`.github/workflows/test.yml`); release builds only start if they pass.

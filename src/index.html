@@ -133,6 +133,15 @@
 <div id="context-menu" class="hidden"></div>
 
 <!-- Scripts -->
-<script src="app.js"></script>
+<!-- Renderer scripts: order matters (init.js boots the app) -->
+<script src="js/core.js"></script>
+<script src="js/events.js"></script>
+<script src="js/chats.js"></script>
+<script src="js/render.js"></script>
+<script src="js/dialogs.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/content.js"></script>
+<script src="js/rooms.js"></script>
+<script src="js/init.js"></script>
 </body>
 </html>
