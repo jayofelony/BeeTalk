@@ -46,6 +46,23 @@ module.exports = async t => {
   await t.wait(50);
   t.ok(await page.js(`state.chats[chatKey('acct_1', '${ROOM}')].lastReadTs >= state.chats[chatKey('acct_1', '${ROOM}')].messages.at(-1).ts`),
     'focusing the window marks the open chat read');
+
+  // Auto-scroll: follow new messages at the bottom, leave the view alone when reading back
+  for (let i = 0; i < 60; i++) send('alice', 'filler ' + i, 100 + i);
+  await t.wait(200);
+  const area = "document.getElementById('messages-area')";
+  const fromBottom = () => page.js(`${area}.scrollHeight - ${area}.scrollTop - ${area}.clientHeight`);
+  t.ok(await fromBottom() <= 2, 'at the bottom: new messages scroll into view');
+  await page.js('new Promise(r => requestAnimationFrame(() => r(0)))');   // openChat's last scroll
+  await page.js(`${area}.scrollTop = 0; ${area}.dispatchEvent(new Event('scroll')); 0`);
+  send('bob', 'while reading back', 200);
+  await t.wait(100);
+  t.equal(await page.js(`${area}.scrollTop`), 0, 'scrolled up: a new message does not move the view');
+  await page.js(`addSystemMsg(chatKey('acct_1', '${ROOM}'), 'acct_1', 'system note'); 0`);
+  t.equal(await page.js(`${area}.scrollTop`), 0, 'scrolled up: a system message does not move the view');
+  send('Tester', 'my own message', 201);
+  await t.wait(100);
+  t.ok(await fromBottom() <= 2, 'own message scrolls to the bottom');
   t.equal(page.consoleErrors, [], 'no errors in the page console');
   page.close();
 };

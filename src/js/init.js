@@ -25,6 +25,11 @@ $('btn-send').addEventListener('click', sendMessage);
 $('btn-chat-info').addEventListener('click', showChatInfoModal);
 $('btn-chat-search').addEventListener('click', showChatSearchModal);
 
+// Follow new messages only while scrolled to the bottom
+messagesArea.addEventListener('scroll', () => { stickToBottom = isScrolledToBottom(); }, { passive: true });
+// Emoticons/images that finish loading make the content taller: stay at the bottom
+messagesArea.addEventListener('load', scrollToBottomIfStuck, true);
+
 msgInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 msgInput.addEventListener('input', () => { msgInput.style.height = 'auto'; msgInput.style.height = Math.min(msgInput.scrollHeight, 130) + 'px'; onComposeInput(); });
 

@@ -84,7 +84,7 @@ function pushMessage(key, msg) {
 
   if (state.activeChatKey === key) {
     appendMessage(msg, chat);
-    scrollToBottom();
+    if (msg.me) scrollToBottom(); else scrollToBottomIfStuck();
   }
 
   scheduleLeftPanel();
@@ -108,7 +108,7 @@ function addSystemMsg(key, accountId, text) {
     el.className = 'system-msg';
     el.textContent = text;
     messagesArea.appendChild(el);
-    scrollToBottom();
+    scrollToBottomIfStuck();
   }
 }
 

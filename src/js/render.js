@@ -574,10 +574,12 @@ function openChat(key, loadHistory = true, scrollTo = 'bottom') {
     
     if (renderIndex < messagesToRender.length) {
       // Schedule next batch
+      scrollToBottom();
       requestAnimationFrame(renderNextBatch);
     } else {
       // All messages rendered (appendMessage already added emoticons and links)
       requestAnimationFrame(() => {
+        if (renderId !== openChatRenderId) return;
         if (scrollTo === 'keep') messagesArea.scrollTop = messagesArea.scrollHeight - keepFromBottom;
         else if (newDivider) {
           // Start reading at the first new message
@@ -601,7 +603,6 @@ function appendMessage(msg, chat) {
     const el = document.createElement('div');
     el.className = 'system-msg'; el.textContent = msg.text;
     messagesArea.appendChild(el);
-    scrollToBottom();
     return;
   }
 
@@ -623,7 +624,6 @@ function appendMessage(msg, chat) {
     linkifyUrls(bubble);
     if (!msg.me && mentionsMe(chat, msg.text)) bubble.classList.add('mention');
     body.insertBefore(bubble, body.querySelector('.msg-time'));
-    scrollToBottom();
     return;
   }
 
@@ -682,7 +682,6 @@ function appendMessage(msg, chat) {
 
   msg.me ? group.append(body, av) : group.append(av, body);
   messagesArea.appendChild(group);
-  scrollToBottom();
 }
 
 function renderParticipants(chat) {
@@ -728,7 +727,14 @@ function renderParticipants(chat) {
   });
 }
 
-function scrollToBottom() { messagesArea.scrollTop = messagesArea.scrollHeight; }
+// New messages only scroll the view when it is at the bottom; reading back
+// older messages is left alone. Updated on every scroll (user or code).
+let stickToBottom = true;
+function isScrolledToBottom() {
+  return messagesArea.scrollHeight - messagesArea.scrollTop - messagesArea.clientHeight <= 2;
+}
+function scrollToBottom() { messagesArea.scrollTop = messagesArea.scrollHeight; stickToBottom = true; }
+function scrollToBottomIfStuck() { if (stickToBottom) scrollToBottom(); }
 function showWelcome()     { welcomeScreen.style.display = 'flex'; chatArea.style.display = 'none'; }
 
 // ─────────────────────────────────────────────
