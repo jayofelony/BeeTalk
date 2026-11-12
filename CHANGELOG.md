@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.1.0] - 2026-11-12
+
+### Fixed
+- The chat no longer jumps to the bottom when a new message arrives while you've scrolled up to read older messages. It only follows new messages when you're at the bottom; your own messages still scroll down
+
 ## [1.0.17] - 2026-09-24
 
 ### Fixed
