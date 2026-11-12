@@ -63,6 +63,16 @@ module.exports = async t => {
   send('Tester', 'my own message', 201);
   await t.wait(100);
   t.ok(await fromBottom() <= 2, 'own message scrolls to the bottom');
+
+  // Main-process events that arrive while the scripts are still loading wait until they are all loaded
+  await page.js('pendingIpcEvents = []; 0');   // as during load
+  page.send('app-blur');
+  await t.wait(50);
+  t.equal(await page.js('state.appIsFocused'), true, 'event during load is held back');
+  await page.js('releaseIpcEvents(); 0');
+  t.equal(await page.js('state.appIsFocused'), false, 'held-back event is delivered once all scripts are loaded');
+  page.send('app-focus');
+  await t.wait(50);
   t.equal(page.consoleErrors, [], 'no errors in the page console');
   page.close();
 };

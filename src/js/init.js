@@ -170,6 +170,8 @@ if (newContactInput) {
 // ─────────────────────────────────────────────
 //  Boot
 // ─────────────────────────────────────────────
+releaseIpcEvents();  // all scripts are loaded: handle main-process events from now on
+
 (async () => {
   // Get and cache version
   try {

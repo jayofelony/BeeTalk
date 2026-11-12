@@ -2,6 +2,18 @@
 // IPC bridge shim, config, state, DOM refs, utilities (escaping, links, modals, click dispatcher), idle detection.
 // Part of the renderer: index.html loads src/js/*.js in order; they share one global scope.
 
+// Main-process events can arrive while the scripts are still loading (e.g. 'app-focus'
+// when the window gets focus), and their handlers use functions from later files.
+// They are queued until init.js calls releaseIpcEvents(), then delivered in order.
+let pendingIpcEvents = [];
+function releaseIpcEvents() {
+  const queued = pendingIpcEvents;
+  pendingIpcEvents = null;
+  for (const [callback, args] of queued) {
+    try { callback(...args); } catch (err) { console.error(err); }
+  }
+}
+
 // Context isolation: use window.electronAPI instead of ipcRenderer
 const ipcRenderer = {
   on: (channel, callback) => {
@@ -11,7 +23,8 @@ const ipcRenderer = {
       i === 0 ? word.charAt(0).toUpperCase() + word.slice(1) : word.charAt(0).toUpperCase() + word.slice(1)
     ).join('');
     const fn = window.electronAPI[camelCase];
-    if (fn) fn(callback); else console.warn(`IPC channel not exposed in preload: ${channel}`);
+    const deliver = (...args) => pendingIpcEvents ? pendingIpcEvents.push([callback, args]) : callback(...args);
+    if (fn) fn(deliver); else console.warn(`IPC channel not exposed in preload: ${channel}`);
   },
   send: (channel, data) => {
     // Convert channel name to camelCase function name
